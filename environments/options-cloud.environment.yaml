@@ -1,0 +1,24 @@
+# Cloud environment for the options agents.
+# Apply once:  ant beta:environments create < options-agents/environments/options-cloud.environment.yaml
+# Sessions reference the returned env_... id.
+#
+# Networking is "limited" (deny-by-default) because this touches a brokerage and
+# money. The agent needs: web search/fetch (research), package managers (the
+# custom-tool host may pip-install), and the brokerage MCP endpoint. Under
+# "limited", MCP servers are reachable only because allow_mcp_servers is true —
+# otherwise brokerage tools silently fail. Widen allowed_hosts as needed.
+name: options-cloud
+description: Cloud sandbox for the tech-options portfolio agents.
+config:
+  type: cloud
+  networking:
+    type: limited
+    allow_package_managers: true
+    allow_mcp_servers: true
+    allowed_hosts:
+      # brokerage / market data the custom-tool host or MCP reaches:
+      - api.tradestation.com
+      - sim-api.tradestation.com
+      - api.polygon.io
+metadata:
+  project: options-agents

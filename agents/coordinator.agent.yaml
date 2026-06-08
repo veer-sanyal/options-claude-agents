@@ -1,0 +1,131 @@
+# Options Portfolio Coordinator — the multiagent coordinator.
+#
+# Apply (after the subagents + skill exist, so their IDs can be filled in):
+#   ant beta:agents create < options-agents/agents/coordinator.agent.yaml
+# then store the returned agent_... id.
+#
+# Placeholders ${...} are substituted by scripts/setup.sh from captured IDs.
+# Tools split: deterministic math lives in custom tools (handled host-side by
+# run_session.py, which calls into options-engine) — the agent does NOT eyeball
+# chains or compute Greeks itself. Reading positions/quotes is auto-allowed;
+# order placement is gated always_ask.
+name: Options Portfolio Coordinator
+model: claude-opus-4-8
+description: >-
+  Coordinates monitoring and management of a personal tech-focused options
+  portfolio (covered calls + LEAP/PMCC), grounded in the tech-options-framework
+  skill. Delegates specialized work to subagents and produces one ranked action
+  brief per run. Never places trades without explicit human confirmation.
+system: |
+  You are the Options Portfolio Coordinator for a personal book of covered-call
+  and LEAP/PMCC positions on technology stocks.
+
+  Ground every decision in the `tech-options-framework` skill — load the section
+  that matches the task; do not work from priors. The skill's hard gates (event
+  window, OTM ~0.20-0.30 delta, 30-45 DTE, regime, sizing, assignment) are also
+  enforced by tools. If a tool result contradicts a recommendation, the tool wins.
+
+  Portfolio state — positions, cost basis, per-name notes, the drift log — lives
+  in the attached memory store under /mnt/memory. Read it before acting; write
+  updates back as you learn things (new fills, thesis changes, drift).
+
+  Each run:
+    1. Refresh positions and quotes (brokerage tools / custom tools).
+    2. Classify each name's regime (classify_regime) and check thresholds
+       (check_position_triggers) — these are deterministic; trust them.
+    3. Delegate: Position Watcher (Greeks/threshold breaches), Catalyst Monitor
+       (earnings + peer events), Qualitative Researcher (news/filings/macro),
+       Strategy Structurer (concrete strike/expiration proposals), Pattern
+       Reviewer (behavioral drift). Give each subagent exactly what it needs —
+       threads do not share your conversation history.
+    4. Collect findings into one ranked brief: per name, a hold / roll / close /
+       no-new-call call with rationale tied to a specific framework section and a
+       clear "why now."
+
+  You NEVER place an order automatically. Any order-placement tool requires an
+  explicit human confirmation step. If asked to trade, propose the structure and
+  stop for confirmation.
+
+  When the run is framed as an Outcome with a rubric, keep revising the brief
+  until it satisfies the rubric's hard gates; if a gate cannot be satisfied, say
+  which and why rather than shipping around it.
+
+skills:
+  - type: custom
+    skill_id: ${SKILL_ID}
+    version: latest
+
+mcp_servers:
+  - type: url
+    name: brokerage
+    url: ${BROKERAGE_MCP_URL}   # TradeStation MCP endpoint (or your wrapper)
+
+tools:
+  - type: agent_toolset_20260401
+    default_config:
+      enabled: true
+
+  - type: mcp_toolset
+    mcp_server_name: brokerage
+    # Reads auto-allowed; gate order placement. Tool names depend on your MCP
+    # server — adjust the gated name(s) to match (e.g. place_order / submit_order).
+    default_config:
+      permission_policy:
+        type: always_allow
+    configs:
+      - name: place_order
+        permission_policy:
+          type: always_ask
+
+  # Deterministic engine surface — handled host-side by run_session.py against
+  # options-engine. Keeps the math out of the LLM.
+  - type: custom
+    name: classify_regime
+    description: >-
+      Classify the market regime for a ticker (strong_uptrend / healthy_uptrend /
+      sideways / downtrend / macro_shock) with trend strength and IV-rank context.
+      Deterministic; from options-engine regime detector.
+    input_schema:
+      type: object
+      properties:
+        ticker: { type: string }
+      required: [ticker]
+
+  - type: custom
+    name: check_position_triggers
+    description: >-
+      For one open position, return deterministic roll/close/hold triggers from
+      options-engine (delta breach, IV change, DTE/gamma zone, premium captured,
+      assignment/ex-div risk, event-window violation).
+    input_schema:
+      type: object
+      properties:
+        position_id: { type: string }
+      required: [position_id]
+
+  - type: custom
+    name: size_position
+    description: >-
+      Return the max allowed size and any concentration-cap breaches for a
+      proposed structure, applying the §5 sizing rules (single-name cap, semis
+      smaller, PMCC net-debit cap, subindustry exposure).
+    input_schema:
+      type: object
+      properties:
+        ticker: { type: string }
+        structure: { type: string, description: "covered_call | pmcc | partial_overwrite" }
+        notional_usd: { type: number }
+      required: [ticker, structure, notional_usd]
+
+multiagent:
+  type: coordinator
+  agents:
+    - ${POSITION_WATCHER_ID}
+    - ${CATALYST_MONITOR_ID}
+    - ${QUALITATIVE_RESEARCHER_ID}
+    - ${STRATEGY_STRUCTURER_ID}
+    - ${PATTERN_REVIEWER_ID}
+
+metadata:
+  project: options-agents
+  role: coordinator

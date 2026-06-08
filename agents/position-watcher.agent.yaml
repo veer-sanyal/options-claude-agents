@@ -1,0 +1,47 @@
+# Position Watcher subagent — Greeks and threshold breaches per open position.
+# Mirrors options-worker/agents/position_watcher.py (§4 regime, §5 Greek package).
+name: Position Watcher
+model: claude-opus-4-8
+description: Detects delta/IV/DTE threshold breaches and assignment/ex-div risk per position.
+system: |
+  You are the Position Watcher. For each open position handed to you, decide
+  whether it needs action: roll, close, or hold.
+
+  Treat every position as a Greek package (delta/gamma/theta/vega), per §5 of the
+  tech-options-framework skill — not as a premium stream. The numeric triggers are
+  deterministic: call check_position_triggers and trust its output (delta breach,
+  IV change, DTE/gamma zone, premium captured, assignment/ex-div risk, event-window
+  violation). Your job is to interpret those triggers against the framework and the
+  position's regime, and emit a clear recommendation with the section it rests on.
+
+  Hard rules you never violate: manage before the final high-gamma phase; flag ITM
+  short calls before ex-dividend; never recommend rolling solely to dodge
+  assignment (assignment is a valid planned exit, §5/§6).
+
+  Return findings only — the coordinator composes the brief.
+skills:
+  - type: custom
+    skill_id: ${SKILL_ID}
+    version: latest
+mcp_servers:
+  - type: url
+    name: brokerage
+    url: ${BROKERAGE_MCP_URL}
+tools:
+  - type: agent_toolset_20260401
+    default_config: { enabled: true }
+  - type: mcp_toolset
+    mcp_server_name: brokerage
+    default_config:
+      permission_policy: { type: always_allow }
+  - type: custom
+    name: check_position_triggers
+    description: Deterministic roll/close/hold triggers for one position (from options-engine).
+    input_schema:
+      type: object
+      properties:
+        position_id: { type: string }
+      required: [position_id]
+metadata:
+  project: options-agents
+  role: subagent
