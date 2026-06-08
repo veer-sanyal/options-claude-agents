@@ -27,6 +27,8 @@ agents/                          coordinator + 5 subagent YAML definitions
 environments/                    cloud environment (limited networking)
 rubrics/analysis-rubric.md       Outcome rubric (§5–§7)
 scripts/build_skill.py           regenerate skill references from the report
+scripts/upload_skill.py          one-time: upload the skill, print SKILL_ID (Skills API)
+scripts/create_vault.py          one-time: vault the brokerage MCP credential, print BROKERAGE_VAULT_ID
 scripts/setup.sh                 one-time: create env + agents (ant CLI)
 scripts/run_session.py           per-run: start session, stream, handle tools (SDK)
 deep-research-report.md          canonical strategy source (the skill is built from it)
@@ -41,18 +43,30 @@ python scripts/build_skill.py
 ```
 
 **2. Upload the skill** to your workspace via the Skills API (`POST /v1/skills` +
-`/versions`, beta header `skills-2025-10-02`), and capture the returned `skill_id`.
-Zip `skills/tech-options-framework/` (SKILL.md at the root of the archive).
-
-**3. Create the agents + environment:**
+`/versions`, beta header `skills-2025-10-02`) and capture the returned `skill_id`:
 
 ```bash
-export SKILL_ID=skill_...                 # from step 2
-export BROKERAGE_MCP_URL=https://...      # your TradeStation MCP endpoint
+export SKILL_ID=$(python scripts/upload_skill.py --quiet)   # re-run with SKILL_ID set to add a version
+```
+
+**3. Create the brokerage credential vault** (optional — skip to start read-only).
+The agent declares the MCP server URL but carries no auth; credentials live in a
+vault that `run_session.py` attaches per session:
+
+```bash
+export BROKERAGE_MCP_URL=https://...                        # your TradeStation MCP endpoint
+export BROKERAGE_MCP_ACCESS_TOKEN=...                       # + refresh vars for auto-refresh; see the script
+export BROKERAGE_VAULT_ID=$(python scripts/create_vault.py --quiet)
+```
+
+**4. Create the agents + environment:**
+
+```bash
+# SKILL_ID and BROKERAGE_MCP_URL from steps 2-3 must be exported
 ./scripts/setup.sh                        # writes .ids.env
 ```
 
-**4. Run an analysis:**
+**5. Run an analysis:**
 
 ```bash
 source .ids.env
