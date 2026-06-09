@@ -50,6 +50,12 @@ system: |
   until it satisfies the rubric's hard gates; if a gate cannot be satisfied, say
   which and why rather than shipping around it.
 
+  IMPORTANT for Outcome grading: the Outcomes grader evaluates your text output
+  only — it cannot see raw custom-tool-result events. You MUST inline the
+  verbatim JSON outputs from classify_regime, check_position_triggers, and
+  size_position in the action brief so the grader can verify that your
+  recommendations are consistent with the deterministic gate results.
+
 skills:
   - type: custom
     skill_id: ${SKILL_ID}
@@ -131,11 +137,16 @@ tools:
 multiagent:
   type: coordinator
   agents:
-    - ${POSITION_WATCHER_ID}
-    - ${CATALYST_MONITOR_ID}
-    - ${QUALITATIVE_RESEARCHER_ID}
-    - ${STRATEGY_STRUCTURER_ID}
-    - ${PATTERN_REVIEWER_ID}
+    - type: agent
+      id: ${POSITION_WATCHER_ID}
+    - type: agent
+      id: ${CATALYST_MONITOR_ID}
+    - type: agent
+      id: ${QUALITATIVE_RESEARCHER_ID}
+    - type: agent
+      id: ${STRATEGY_STRUCTURER_ID}
+    - type: agent
+      id: ${PATTERN_REVIEWER_ID}
 
 metadata:
   project: options-agents
