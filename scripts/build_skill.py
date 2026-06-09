@@ -48,6 +48,25 @@ SLUGS = {
 }
 
 
+# Deep-research exports carry citation/entity markup that is invisible noise to a
+# human reader but lands verbatim in the skill the model reads. Strip it: ChatGPT
+# "cite…turn…" tokens (often wrapped in private-use-area chars U+E200–U+E206),
+# entity[...] annotations, and any stray private-use characters.
+_CITE_TOKEN_RE = re.compile("\ue200[^\ue201]*\ue201")  # whole \ue200...\ue201 cluster (entity[...] / cite...turn...), separators and all
+_ENTITY_RE = re.compile(r"entity\[[^\]]*\]")
+_NAV_TOKEN_RE = re.compile(r"(?:cite|navlist|video|image|news)turn\d+\w*")
+
+
+def clean(text: str) -> str:
+    """Remove deep-research export markup so it never reaches the model."""
+    text = _CITE_TOKEN_RE.sub("", text)
+    text = _ENTITY_RE.sub("", text)
+    text = _NAV_TOKEN_RE.sub("", text)
+    # Drop any leftover Unicode private-use-area characters.
+    text = "".join(ch for ch in text if not (0xE000 <= ord(ch) <= 0xF8FF))
+    return text
+
+
 def split_sections(text: str) -> list[tuple[str, str]]:
     """Return [(heading, body_including_heading), ...] for each `## ` section."""
     sections: list[tuple[str, str]] = []
@@ -86,7 +105,7 @@ def main() -> None:
             "     Source: deep-research-report.md  ·  Regenerate: "
             "python options-agents/scripts/build_skill.py -->\n\n"
         )
-        (REFS / f"{slug}.md").write_text(banner + body.rstrip() + "\n")
+        (REFS / f"{slug}.md").write_text(banner + clean(body).rstrip() + "\n")
         written += 1
         print(f"  wrote {slug}.md  <-  ## {heading}")
 

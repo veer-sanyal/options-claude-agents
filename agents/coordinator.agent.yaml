@@ -67,15 +67,26 @@ tools:
 
   - type: mcp_toolset
     mcp_server_name: brokerage
-    # Reads auto-allowed; gate order placement. Tool names depend on your MCP
-    # server — adjust the gated name(s) to match (e.g. place_order / submit_order).
+    # SAFETY: default-DENY (always_ask), allow-list reads only. This is the only
+    # agent that mounts an order-capable brokerage. Gating order placement by a
+    # guessed tool name fails open — if your MCP server names its order tool
+    # submit_order / place_equity_option_order, an always_ask rule on `place_order`
+    # silently misses and it falls under the default. Inverting it means any order
+    # tool (misnamed, newly added, or unknown) fails safe behind a human prompt;
+    # only the explicit read tools below run unattended. Update these names to
+    # match your MCP server's read tools — and never add an order tool here.
     default_config:
       permission_policy:
-        type: always_allow
+        type: always_ask
     configs:
-      - name: place_order
-        permission_policy:
-          type: always_ask
+      - name: get_quotes          # market data snapshot — read-only
+        permission_policy: { type: always_allow }
+      - name: get_positions       # open positions — read-only
+        permission_policy: { type: always_allow }
+      - name: get_balances        # account balances — read-only
+        permission_policy: { type: always_allow }
+      - name: get_option_chain    # option chains — read-only
+        permission_policy: { type: always_allow }
 
   # Deterministic engine surface — handled host-side by run_session.py against
   # options-engine. Keeps the math out of the LLM.

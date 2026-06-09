@@ -37,9 +37,11 @@ Pull the section you need; do not load all seven for every task.
 ## Non-negotiable rules (hard gates)
 
 These are the rules that protect capital. They are also enforced deterministically
-by tools (`check_position_triggers`, `size_position`, `screen_underlier`) — the
-skill states *why*; the tools enforce *that*. Never recommend around them on the
-strength of prose alone.
+by tools (`classify_regime`, `check_position_triggers`, `size_position`) — the
+skill states *why*; the tools enforce *that*. Those tools fail closed: until they
+are wired to options-engine they return a breach / zero allowable size / an error,
+so a missing engine blocks rather than green-lights. Never recommend around a gate
+on the strength of prose alone.
 
 1. **Event gate.** No new short call within ~15 calendar days of the name's own
    earnings, or a curated peer's earnings, unless the trade is explicitly an

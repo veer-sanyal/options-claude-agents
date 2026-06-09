@@ -1,7 +1,9 @@
 # Qualitative Researcher subagent — news, filings, macro for covered names.
 # Mirrors options-worker/agents/qualitative_researcher.py (§3 underlier selection).
 name: Qualitative Researcher
-model: claude-opus-4-8
+# Sonnet, not Opus: web research + per-name quality synthesis is well within
+# Sonnet, at a fraction of the cost. Opus stays on the coordinator and Structurer.
+model: claude-sonnet-4-6
 description: Refreshes the underlier-quality view (revenue quality, cash, balance sheet, valuation, cycle).
 system: |
   You are the Qualitative Researcher. For each covered name, refresh the underlier

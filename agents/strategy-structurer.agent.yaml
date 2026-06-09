@@ -34,8 +34,18 @@ tools:
     default_config: { enabled: true }
   - type: mcp_toolset
     mcp_server_name: brokerage
+    # Read-only scope. MCP servers are agent-scoped, so this mount needs its own
+    # gating — "reads only" in a comment is not a policy. Default-deny
+    # (always_ask) and allow-list only the chain/quote reads this agent needs; no
+    # order tool is allow-listed, so anything unexpected fails safe behind a
+    # confirmation (which cross-posts to the primary thread).
     default_config:
-      permission_policy: { type: always_allow }   # chain/quote reads only; no order tools here
+      permission_policy: { type: always_ask }
+    configs:
+      - name: get_option_chain
+        permission_policy: { type: always_allow }
+      - name: get_quotes
+        permission_policy: { type: always_allow }
   - type: custom
     name: size_position
     description: Max allowed size + concentration-cap breaches for a proposed structure (§5 sizing).

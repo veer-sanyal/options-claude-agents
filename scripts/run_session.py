@@ -14,7 +14,10 @@ Flags:
 
 The custom-tool handlers below are where the deterministic math stays out of the
 LLM. Wire each one to options-engine (import it, or call options-api over HTTP).
-They ship as stubs so the loop runs end-to-end before you connect the engine.
+Until then they FAIL CLOSED — an unwired sizing/trigger tool returns a breach,
+zero allowable size, or an error rather than a permissive default, so a missing
+engine blocks rather than green-lights. Arm them only after wiring by setting
+OPTIONS_ENGINE_CONNECTED=1.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ import json
 import os
 import pathlib
 import sys
+from typing import NoReturn
 
 import anthropic
 
@@ -32,30 +36,75 @@ RUBRIC = PROJECT_ROOT / "rubrics" / "analysis-rubric.md"
 
 
 # --------------------------------------------------------------------------- #
-# Deterministic custom tools — handled host-side. Replace the stub bodies with
-# real calls into options-engine / options-api. Keep the math here, not in the
-# model. Names must match the custom tools declared in the agent YAML.
+# Deterministic custom tools — handled host-side. These are the hard-gate
+# enforcers (regime, triggers, sizing, behavioral metrics) and they MUST stay
+# out of the model. Until they are wired to options-engine they FAIL CLOSED: a
+# money system must never let a missing engine rubber-stamp a trade, so an
+# unwired tool returns a breach / zero allowable size / an error rather than a
+# permissive default. Replace each stub body with a real options-engine call AND
+# set OPTIONS_ENGINE_CONNECTED=1 to arm them. Names must match the agent YAML.
 # --------------------------------------------------------------------------- #
+ENGINE_CONNECTED = os.environ.get("OPTIONS_ENGINE_CONNECTED", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
+
+def _unwired(tool: str) -> NoReturn:
+    raise NotImplementedError(
+        f"{tool}: OPTIONS_ENGINE_CONNECTED is set but the handler still has its stub "
+        f"body — wire it to options-engine before arming the engine flag."
+    )
+
+
 def classify_regime(args: dict) -> dict:
-    # TODO: options_engine.regime.detector.classify(args["ticker"])
-    return {"ticker": args["ticker"], "regime": "sideways", "trend_strength": 0.0, "iv_rank": None,
-            "_stub": True}
+    if not ENGINE_CONNECTED:
+        # Fail closed: regime is unknown, not benign. The model must not assume a
+        # tradeable regime (the regime gate cannot be satisfied) while offline.
+        return {"ticker": args["ticker"],
+                "error": "options_engine_not_connected",
+                "message": "Regime unavailable — engine offline. The regime gate cannot "
+                           "be verified; do not open or hold new short calls on regime grounds.",
+                "_fail_closed": True}
+    _unwired("classify_regime")  # TODO: options_engine.regime.detector.classify(args["ticker"])
 
 
 def check_position_triggers(args: dict) -> dict:
-    # TODO: options_engine.portfolio.triggers.evaluate(args["position_id"])
-    return {"position_id": args["position_id"], "triggers": [], "_stub": True}
+    if not ENGINE_CONNECTED:
+        # Fail closed: emit a blocking trigger instead of "no triggers", so the
+        # watcher cannot read silence as "safe to hold / overwrite".
+        return {"position_id": args["position_id"],
+                "triggers": [{
+                    "type": "engine_offline",
+                    "action": "block",
+                    "message": "Triggers unavailable — engine offline. Cannot verify "
+                               "delta/DTE/assignment/event-window gates; treat as "
+                               "unmanageable and do not recommend a new overwrite.",
+                }],
+                "_fail_closed": True}
+    _unwired("check_position_triggers")  # TODO: options_engine.portfolio.triggers.evaluate(...)
 
 
 def size_position(args: dict) -> dict:
-    # TODO: options_engine.portfolio.sizing.max_size(...)
-    return {"ticker": args["ticker"], "max_notional_usd": args["notional_usd"],
-            "breaches": [], "_stub": True}
+    if not ENGINE_CONNECTED:
+        # Fail closed: zero allowable size + a breach. Now any non-zero sizing in a
+        # recommendation contradicts the tool result, so the rubric's hard gate fires.
+        return {"ticker": args["ticker"],
+                "max_notional_usd": 0,
+                "breaches": ["options_engine_not_connected: sizing engine offline; max "
+                             "allowable size is 0 until it is wired."],
+                "_fail_closed": True}
+    _unwired("size_position")  # TODO: options_engine.portfolio.sizing.max_size(...)
 
 
 def pattern_metrics(args: dict) -> dict:
-    # TODO: options_engine.portfolio.patterns / metrics over args["lookback_days"]
-    return {"lookback_days": args["lookback_days"], "metrics": {}, "_stub": True}
+    if not ENGINE_CONNECTED:
+        # Fail closed: no metrics rather than empty metrics (which read as "no drift").
+        return {"lookback_days": args["lookback_days"],
+                "error": "options_engine_not_connected",
+                "message": "Behavioral metrics unavailable — engine offline. Do not claim "
+                           "'no drift'; state that metrics could not be computed.",
+                "_fail_closed": True}
+    _unwired("pattern_metrics")  # TODO: options_engine.portfolio.patterns / metrics
 
 
 HANDLERS = {
@@ -73,17 +122,22 @@ def env(name: str) -> str:
     return val
 
 
-def ensure_memory_store(client: anthropic.Anthropic) -> str:
-    """Reuse MEMORY_STORE_ID if set, else create one. Persist the id yourself."""
-    existing = os.environ.get("MEMORY_STORE_ID")
-    if existing:
-        return existing
-    store = client.beta.memory_stores.create(
-        name="options-portfolio-state",
-        description="Open positions, cost basis, per-name notes, and the behavioral drift log.",
-    )
-    print(f"created memory store {store.id} — add MEMORY_STORE_ID={store.id} to .ids.env to reuse")
-    return store.id
+def memory_store_id() -> str:
+    """Return the persisted MEMORY_STORE_ID, or fail closed.
+
+    We deliberately do NOT create a store here. Creating one per run silently
+    resets portfolio state and the drift log every time — which defeats the whole
+    review loop. Store creation + seeding lives in scripts/init_memory.py (run by
+    setup.sh), which writes MEMORY_STORE_ID into .ids.env.
+    """
+    sid = os.environ.get("MEMORY_STORE_ID")
+    if not sid:
+        sys.exit(
+            "missing MEMORY_STORE_ID — run scripts/init_memory.py (setup.sh does this) "
+            "and `source .ids.env`. Refusing to spin up a throwaway store that would "
+            "reset portfolio state and the drift log on every run."
+        )
+    return sid
 
 
 def main() -> None:
@@ -94,7 +148,7 @@ def main() -> None:
     args = ap.parse_args()
 
     client = anthropic.Anthropic()
-    store_id = ensure_memory_store(client)
+    store_id = memory_store_id()
 
     session = client.beta.sessions.create(
         agent=env("COORDINATOR_ID"),               # latest version

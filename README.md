@@ -29,8 +29,10 @@ rubrics/analysis-rubric.md       Outcome rubric (§5–§7)
 scripts/build_skill.py           regenerate skill references from the report
 scripts/upload_skill.py          one-time: upload the skill, print SKILL_ID (Skills API)
 scripts/create_vault.py          one-time: vault the brokerage MCP credential, print BROKERAGE_VAULT_ID
-scripts/setup.sh                 one-time: create env + agents (ant CLI)
+scripts/init_memory.py           one-time: create + seed the portfolio memory store, print MEMORY_STORE_ID
+scripts/setup.sh                 one-time: create env + agents + memory store (ant CLI)
 scripts/run_session.py           per-run: start session, stream, handle tools (SDK)
+memory-seed/                     first-run seed for the memory store (positions + drift log)
 deep-research-report.md          canonical strategy source (the skill is built from it)
 ```
 
@@ -73,13 +75,37 @@ source .ids.env
 python scripts/run_session.py --outcome   # grade-and-revise against the rubric
 ```
 
+## Updating agents (don't re-create)
+
+Use `ant beta:agents update` to change an agent, not re-create — it preserves version
+history and lets running sessions keep their pinned version. One extra step is easy to
+miss: **the coordinator pins its subagent roster to the versions resolved at its own
+create/update time, and later subagent updates do not propagate.** So after updating *any*
+subagent, also update the coordinator (re-run its `update`) or it keeps delegating to the
+stale version. Keep that in your CI step. `setup.sh` re-creates everything together, so it's
+always consistent — the gotcha only bites the incremental update path.
+
+Portfolio state and the drift log live in a **memory store** created and seeded by
+`init_memory.py` (run by `setup.sh`) and pinned via `MEMORY_STORE_ID` in `.ids.env`.
+`run_session.py` reuses that id and **refuses to create a throwaway store** if it's unset —
+otherwise state would reset every run.
+
 ## Wiring the deterministic tools
 
 `scripts/run_session.py` ships the custom-tool handlers (`classify_regime`,
-`check_position_triggers`, `size_position`, `pattern_metrics`) as **stubs** so the loop
-runs before the engine is connected. Replace each stub body with a call into
-`options-engine` (import it) or `options-api` (HTTP). This is the deliberate split: the
-model decides *what* to check; the engine computes the numbers.
+`check_position_triggers`, `size_position`, `pattern_metrics`) **failing closed**: until
+they are wired to the engine they return a breach / zero allowable size / an error, so a
+missing engine *blocks* rather than green-lights — the right failure direction for a
+money system. To wire them:
+
+1. Replace each stub body with a call into `options-engine` (import it) or `options-api`
+   (HTTP). This is the deliberate split: the model decides *what* to check; the engine
+   computes the numbers.
+2. Set `OPTIONS_ENGINE_CONNECTED=1` to arm them. (With the flag set but a body still
+   unwired, the handler raises rather than silently returning a stub value.)
+
+Leave the flag unset to run the loop for plumbing/testing — every gate will refuse, which
+is the safe default.
 
 ## Brokerage & safety notes
 
@@ -87,9 +113,19 @@ model decides *what* to check; the engine computes the numbers.
   has no official API (community MCP servers wrap unofficial endpoints — 2FA/ToS/breakage
   risk); prefer TradeStation for anything that matters.
 - MCP credentials go in a **vault** (`BROKERAGE_VAULT_ID`), never inline or in prompts.
-- Position/quote reads are auto-allowed; **order placement is gated `always_ask`** and
-  surfaces a confirmation prompt in `run_session.py`. Start read-only; add gated orders
-  only once you trust the loop.
+- The brokerage mount is **default-deny (`always_ask`) with an explicit read-only
+  allow-list** (quotes/positions/chains), not default-allow-with-a-gated-order-tool.
+  Gating a guessed order-tool name fails open — if your MCP server names its order tool
+  `submit_order` or `place_equity_option_order`, an `always_ask` rule on `place_order`
+  silently misses. Inverting it makes any order tool (misnamed, new, or unknown) fail
+  safe behind a human prompt. **Update the allow-listed read-tool names in the agent YAML
+  to match your MCP server, and never add an order tool to that list.**
+- MCP servers are **agent-scoped** — each agent declares its own mount, so each needs its
+  own gating. Only the **coordinator** mounts an order-capable brokerage; Position Watcher
+  and Strategy Structurer get a **read-only scope** (same default-deny, reads only).
+- Order placement surfaces a confirmation prompt in `run_session.py` (subagent prompts
+  cross-post to the primary thread). Start read-only; add gated orders only once you trust
+  the loop.
 
 ## Relationship to `options`
 
