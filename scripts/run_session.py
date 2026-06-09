@@ -165,9 +165,6 @@ def main() -> None:
     print(f"session {session.id}")
     print(f"watch: https://platform.claude.com/workspaces/default/sessions/{session.id}")
 
-    # Stream-first, then send the kickoff.
-    stream = client.beta.sessions.events.stream(session_id=session.id)
-
     if args.outcome:
         kickoff = {
             "type": "user.define_outcome",
@@ -177,49 +174,83 @@ def main() -> None:
         }
     else:
         kickoff = {"type": "user.message", "content": [{"type": "text", "text": args.message}]}
-    client.beta.sessions.events.send(session_id=session.id, events=[kickoff])
 
-    for event in stream:
-        etype = event.type
+    # Stream-first so we never miss events, then send the kickoff.
+    with client.beta.sessions.events.stream(session_id=session.id) as stream:
+        client.beta.sessions.events.send(session_id=session.id, events=[kickoff])
 
-        if etype == "agent.message":
-            for block in getattr(event, "content", []) or []:
-                if getattr(block, "type", None) == "text":
-                    print(block.text, end="", flush=True)
+        events_by_id: dict[str, object] = {}
 
-        elif etype == "agent.custom_tool_use":
-            handler = HANDLERS.get(event.name)
-            result = handler(event.input) if handler else {"error": f"unknown tool {event.name}"}
-            client.beta.sessions.events.send(
-                session_id=session.id,
-                events=[{
-                    "type": "user.custom_tool_result",
-                    "custom_tool_use_id": event.id,
-                    "content": [{"type": "text", "text": json.dumps(result)}],
-                    "is_error": "error" in result,
-                }],
-            )
+        for event in stream:
+            etype = event.type
 
-        elif etype == "agent.mcp_tool_use" and getattr(event, "evaluated_permission", None) == "ask":
-            # Order placement (always_ask). Human-in-the-loop confirmation.
-            print(f"\n[CONFIRM] {event.name} input={json.dumps(event.input)}")
-            ok = input("allow this order? [y/N] ").strip().lower() == "y"
-            client.beta.sessions.events.send(
-                session_id=session.id,
-                events=[{
-                    "type": "user.tool_confirmation",
-                    "tool_use_id": event.id,
-                    "result": "allow" if ok else "deny",
-                    **({} if ok else {"deny_message": "Human declined the order."}),
-                }],
-            )
+            if hasattr(event, "id") and event.id:
+                events_by_id[event.id] = event
 
-        elif etype == "session.status_terminated":
-            break
-        elif etype == "session.status_idle":
-            if getattr(event.stop_reason, "type", None) == "requires_action":
-                continue          # waiting on a tool result / confirmation we just sent
-            break                 # end_turn or retries_exhausted
+            if etype == "agent.message":
+                for block in getattr(event, "content", []) or []:
+                    if getattr(block, "type", None) == "text":
+                        print(block.text, end="", flush=True)
+
+            elif etype in ("session.status_idle", "session.thread_status_idle"):
+                stop = getattr(event, "stop_reason", None)
+                if not stop or getattr(stop, "type", None) != "requires_action":
+                    if etype == "session.status_idle":
+                        break
+                    continue
+
+                pending_confirmations: list[tuple[str, object]] = []
+                pending_tool_results: list[dict] = []
+
+                for blocking_id in getattr(stop, "event_ids", []):
+                    blocked = events_by_id.get(blocking_id)
+                    if blocked is None:
+                        continue
+                    btype = getattr(blocked, "type", "")
+
+                    if btype == "agent.custom_tool_use":
+                        handler = HANDLERS.get(blocked.name)
+                        result = handler(blocked.input) if handler else {
+                            "error": f"unknown tool {blocked.name}",
+                        }
+                        pending_tool_results.append({
+                            "type": "user.custom_tool_result",
+                            "custom_tool_use_id": blocking_id,
+                            "content": [{"type": "text", "text": json.dumps(result)}],
+                            "is_error": "error" in result,
+                        })
+
+                    elif btype in ("agent.tool_use", "agent.mcp_tool_use"):
+                        pending_confirmations.append((blocking_id, blocked))
+
+                if pending_tool_results:
+                    client.beta.sessions.events.send(
+                        session_id=session.id,
+                        events=pending_tool_results,
+                    )
+
+                if pending_confirmations:
+                    confirmation_events: list[dict] = []
+                    for tool_id, blocked_evt in pending_confirmations:
+                        tool_name = getattr(blocked_evt, "name", "unknown")
+                        tool_input = getattr(blocked_evt, "input", {})
+                        print(f"\n[CONFIRM] {tool_name} input={json.dumps(tool_input)}")
+                        ok = input("allow this call? [y/N] ").strip().lower() == "y"
+                        evt: dict = {
+                            "type": "user.tool_confirmation",
+                            "tool_use_id": tool_id,
+                            "result": "allow" if ok else "deny",
+                        }
+                        if not ok:
+                            evt["deny_message"] = "Human declined the call."
+                        confirmation_events.append(evt)
+                    client.beta.sessions.events.send(
+                        session_id=session.id,
+                        events=confirmation_events,
+                    )
+
+            elif etype == "session.status_terminated":
+                break
 
     print()
 

@@ -57,5 +57,9 @@ themselves fail the brief.
   strong uptrend — violates §2/§4" is gradeable; "looks aggressive" is not.
 - The hard gates are also tool-enforced; if a recommendation contradicts a tool
   result (`check_position_triggers`, `size_position`), that is an automatic fail.
+- **Tool outputs inlined.** The brief must include the verbatim JSON outputs from
+  `classify_regime`, `check_position_triggers`, and `size_position` for every name
+  so this grader can verify consistency. The grader cannot see raw custom-tool-result
+  events — only the agent's text output is visible.
 - Max iterations: start at 4. If still failing hard gates after 4, the brief should
   state which gate it cannot satisfy and why, rather than silently shipping.
