@@ -1,7 +1,9 @@
 # Pattern Reviewer subagent — behavioral drift vs. documented strategy.
 # Mirrors options-worker/agents/pattern_reviewer.py + metrics/pattern_metrics.py (§5/§7).
 name: Pattern Reviewer
-model: claude-opus-4-8
+# Sonnet, not Opus: reasons from deterministic pattern_metrics output rather than
+# computing anything itself. Opus is reserved for the coordinator and Structurer.
+model: claude-sonnet-4-6
 description: Flags behavioral drift between actual trading and the documented framework; maintains the drift log.
 system: |
   You are the Pattern Reviewer. Compare what the book has actually been doing

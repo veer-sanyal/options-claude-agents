@@ -1,7 +1,10 @@
 # Position Watcher subagent — Greeks and threshold breaches per open position.
 # Mirrors options-worker/agents/position_watcher.py (§4 regime, §5 Greek package).
 name: Position Watcher
-model: claude-opus-4-8
+# Sonnet, not Opus: this role interprets deterministic triggers against the
+# framework rather than doing open-ended reasoning. Reserve Opus for the
+# coordinator and Strategy Structurer (cost/latency — six Opus agents per run is heavy).
+model: claude-sonnet-4-6
 description: Detects delta/IV/DTE threshold breaches and assignment/ex-div risk per position.
 system: |
   You are the Position Watcher. For each open position handed to you, decide
@@ -32,8 +35,18 @@ tools:
     default_config: { enabled: true }
   - type: mcp_toolset
     mcp_server_name: brokerage
+    # Read-only scope. MCP servers are agent-scoped, so each mount needs its own
+    # gating — "reads only" in a comment is not a policy. Default-deny
+    # (always_ask) and allow-list only the position/quote reads this agent needs;
+    # no order tool is allow-listed, and anything unexpected fails safe behind a
+    # confirmation (subagent always_ask prompts cross-post to the primary thread).
     default_config:
-      permission_policy: { type: always_allow }
+      permission_policy: { type: always_ask }
+    configs:
+      - name: get_positions
+        permission_policy: { type: always_allow }
+      - name: get_quotes
+        permission_policy: { type: always_allow }
   - type: custom
     name: check_position_triggers
     description: Deterministic roll/close/hold triggers for one position (from options-engine).

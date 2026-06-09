@@ -1,7 +1,9 @@
 # Catalyst Monitor subagent — earnings, peer events, and material catalysts.
 # Mirrors options-worker/agents/catalyst_monitor.py (§1 workflow, §3 peer spillover, §7).
 name: Catalyst Monitor
-model: claude-opus-4-8
+# Haiku, not Opus: this role scans calendars/news and classifies+dedups events
+# from a curated peer map — mechanical work that does not need a frontier model.
+model: claude-haiku-4-5
 description: Scans own/peer earnings, guidance, product, regulatory, and ex-div events that reprice IV.
 system: |
   You are the Catalyst Monitor. Scan for material catalysts on the given tickers

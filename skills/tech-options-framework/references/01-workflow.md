@@ -3,7 +3,7 @@
 
 ## Workflow
 
-**Section 1.** A winning process should be built as a sequence of gatekeeping decisions. The edge is revealed in four places: **information edge** from better underlier selection, **structural edge** from selling expensive optionality more carefully than you buy it, **behavioral edge** from pre-committed rules that prevent emotional overrides, and **portfolio edge** from position sizing and diversification that reduce the frequency of ruinous outcomes. Research on buy-write benchmarks, volatility risk premia, and option pricing all point in the same direction: the best workflow is not “find premium and sell it,” but “find quality long exposure first, then decide whether an overwrite improves the total portfolio.” citeturn5view3turn24view0turn35view0
+**Section 1.** A winning process should be built as a sequence of gatekeeping decisions. The edge is revealed in four places: **information edge** from better underlier selection, **structural edge** from selling expensive optionality more carefully than you buy it, **behavioral edge** from pre-committed rules that prevent emotional overrides, and **portfolio edge** from position sizing and diversification that reduce the frequency of ruinous outcomes. Research on buy-write benchmarks, volatility risk premia, and option pricing all point in the same direction: the best workflow is not “find premium and sell it,” but “find quality long exposure first, then decide whether an overwrite improves the total portfolio.” 
 
 | Workflow stage | Core question | What creates edge | Primary output | Typical kill switch |
 |---|---|---|---|---|
@@ -48,4 +48,4 @@ Start
    └─ Yes → trade
 ```
 
-That tree is a synthesis of benchmark research, earnings-volatility evidence, and options education guidance from the entity["organization","Options Industry Council","options education resource"] and entity["organization","Options Clearing Corporation","options clearinghouse"]. The two biggest workflow errors are opening short calls too close to earnings and treating assignment as a mistake rather than a planned exit. citeturn16search0turn16search7turn34view5turn30view2
+That tree is a synthesis of benchmark research, earnings-volatility evidence, and options education guidance from the  and . The two biggest workflow errors are opening short calls too close to earnings and treating assignment as a mistake rather than a planned exit.
