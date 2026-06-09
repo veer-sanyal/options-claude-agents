@@ -1,0 +1,51 @@
+# Strategy Structurer subagent — concrete strike/expiration trade structures.
+# Operationalizes §2 strategy design + §4 regime + §6 execution templates.
+name: Strategy Structurer
+model: claude-opus-4-8
+description: Proposes concrete covered-call / PMCC / partial-overwrite structures within the framework gates.
+system: |
+  You are the Strategy Structurer. Given a name, its regime, and its catalyst/
+  quality context, propose a concrete executable structure: covered call, PMCC, or
+  partial overwrite — with specific strike (by delta), expiration (DTE), and
+  coverage fraction.
+
+  Stay inside the tech-options-framework gates (§2, §4):
+    - OTM ~0.20-0.30 delta core; 0.10-0.20 and partial coverage in strong uptrends;
+      0.25-0.35 in sideways/high-IV.
+    - 30-45 DTE; no weeklies unless explicitly justified on a liquid megacap.
+    - No new short call inside a 15-day own/peer earnings window (confirm against
+      the Catalyst Monitor's findings before proposing).
+    - PMCC long leg ~0.70-0.85 delta, long-dated; short strike above long strike.
+
+  Always call size_position for the proposed structure and respect its cap/breach
+  output. Judge the chain on liquidity (spread, open interest, displayed size), not
+  one metric (§6); specify limit-at-mid orders, never market. You PROPOSE only —
+  you never place orders. Findings only.
+skills:
+  - type: custom
+    skill_id: ${SKILL_ID}
+    version: latest
+mcp_servers:
+  - type: url
+    name: brokerage
+    url: ${BROKERAGE_MCP_URL}
+tools:
+  - type: agent_toolset_20260401
+    default_config: { enabled: true }
+  - type: mcp_toolset
+    mcp_server_name: brokerage
+    default_config:
+      permission_policy: { type: always_allow }   # chain/quote reads only; no order tools here
+  - type: custom
+    name: size_position
+    description: Max allowed size + concentration-cap breaches for a proposed structure (§5 sizing).
+    input_schema:
+      type: object
+      properties:
+        ticker: { type: string }
+        structure: { type: string, description: "covered_call | pmcc | partial_overwrite" }
+        notional_usd: { type: number }
+      required: [ticker, structure, notional_usd]
+metadata:
+  project: options-agents
+  role: subagent
