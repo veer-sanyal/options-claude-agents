@@ -19,6 +19,12 @@ Qualitative Researcher, Strategy Structurer, Pattern Reviewer) — mirroring the
 worker agents — and produces one ranked action brief per run. **It never places trades
 without explicit human confirmation** (order tools are gated `always_ask`).
 
+## Paper trading
+
+`paper-trading/` is a separate, standalone bot that runs a Claude strategy on an
+Alpaca **paper** (fake money) account, with hard limits in code and no live-money
+mode. See `paper-trading/README.md`.
+
 ## Layout
 
 ```
