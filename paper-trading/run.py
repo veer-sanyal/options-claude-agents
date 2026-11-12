@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Paper-trading bot entry point.
 
-    python run.py                # dry run: reads your PAPER account, asks Claude, sends nothing
+    python run.py                # dry run: reads your PAPER account, asks Claude (via Claude Code), sends nothing
     python run.py --trade        # same, then sends the approved orders to your PAPER account
     python run.py --mock         # no keys needed: fake account and a scripted decision
     python run.py --reset-halt   # clear the drawdown halt and restart the drawdown baseline
@@ -21,6 +21,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from papertrader.config import load_settings  # noqa: E402
+from papertrader.decide import find_claude  # noqa: E402
 from papertrader.safety import LiveTradingRefused, check_environment  # noqa: E402
 
 
@@ -67,10 +68,10 @@ def main(argv: list[str] | None = None) -> int:
                 print("Missing ALPACA_API_KEY / ALPACA_SECRET_KEY. Put your PAPER keys in "
                       "paper-trading/.env (see README.md), or use --mock.", file=sys.stderr)
                 return 2
-            if not args.reset_halt and not (os.environ.get("ANTHROPIC_API_KEY")
-                                            or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
-                print("Missing ANTHROPIC_API_KEY. Put it in paper-trading/.env (see README.md), "
-                      "or use --mock.", file=sys.stderr)
+            if not args.reset_halt and not find_claude(settings.claude_bin):
+                where = f"at CLAUDE_BIN={settings.claude_bin}" if settings.claude_bin else "on PATH"
+                print(f"Claude Code (the claude command) was not found {where}. Install it and "
+                      "log in (see README.md), or use --mock.", file=sys.stderr)
                 return 2
             broker = AlpacaBroker(key, secret)
         except LiveTradingRefused as e:

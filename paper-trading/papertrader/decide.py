@@ -7,12 +7,15 @@ which can shrink or reject it. Claude never sends an order itself.
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from anthropic import transform_schema
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .config import PROJECT_DIR, Settings
 
@@ -20,6 +23,8 @@ STRATEGY_FILE = PROJECT_DIR / "strategy.md"
 
 
 class ProposedTrade(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str = Field(description="Ticker from the watchlist, e.g. MSFT")
     action: Literal["buy", "sell"]
     dollars: float = Field(description="Dollar amount to buy, or dollar value to sell")
@@ -27,6 +32,8 @@ class ProposedTrade(BaseModel):
 
 
 class Decision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     market_view: str = Field(description="Two or three sentences on what the numbers show today")
     trades: list[ProposedTrade] = Field(description="Proposed trades; an empty list means do nothing")
     notes: str = Field(description="Anything skipped and why, or an empty string")
@@ -39,7 +46,7 @@ class DecisionResult:
 
 
 EMPTY = Decision(market_view="", trades=[], notes="")
-DECISION_SCHEMA = transform_schema(Decision)
+DECISION_SCHEMA = Decision.model_json_schema()
 
 OUTPUT_RULES = """
 You are the decision step of a paper-trading bot (fake money, Alpaca paper account).
@@ -88,57 +95,138 @@ def build_prompt(settings: Settings, snapshot: dict, features: dict[str, dict],
     return system, user
 
 
-class ClaudeDecider:
-    def __init__(self, settings: Settings, strategy_file: Path = STRATEGY_FILE):
-        import anthropic
+# Secrets the Claude Code call never needs. The Anthropic ones are removed so the
+# call runs on your Claude subscription: in print mode Claude Code always uses
+# ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN when one is set, which would bill an
+# API account instead.
+CHILD_ENV_DROP = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ALPACA_API_KEY",
+                  "ALPACA_SECRET_KEY", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY")
 
+# Where Claude Code usually lives, for runs (like cron) whose PATH is minimal.
+CLAUDE_BIN_CANDIDATES = (
+    "~/.local/bin/claude",
+    "~/.claude/local/claude",
+    "/opt/homebrew/bin/claude",
+    "/usr/local/bin/claude",
+)
+
+
+def find_claude(configured: str | None = None) -> str | None:
+    """Path to the claude CLI, or None if it can't be found."""
+    if configured:
+        path = Path(configured).expanduser()
+        return str(path) if path.is_file() and os.access(path, os.X_OK) else None
+    found = shutil.which("claude")
+    if found:
+        return found
+    for c in CLAUDE_BIN_CANDIDATES:
+        path = Path(c).expanduser()
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    return None
+
+
+def child_env() -> dict[str, str]:
+    return {k: v for k, v in os.environ.items() if k not in CHILD_ENV_DROP}
+
+
+def _tail(text: str | bytes | None, n: int = 500) -> str:
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", "replace")
+    return (text or "").strip()[-n:]
+
+
+class ClaudeDecider:
+    """Asks Claude through Claude Code (the `claude` CLI) in print mode, so the
+    call runs on your logged-in Claude subscription. No API key is involved.
+
+    Claude Code runs with every tool switched off, your CLAUDE.md files, hooks,
+    plugins and MCP servers ignored (--safe-mode), in an empty temporary folder.
+    It can only read the prompt and answer in the Decision JSON shape.
+    """
+
+    def __init__(self, settings: Settings, strategy_file: Path = STRATEGY_FILE,
+                 run=subprocess.run):
         self.settings = settings
         self.strategy_text = strategy_file.read_text()
-        # Reads ANTHROPIC_API_KEY from the environment.
-        self.client = anthropic.Anthropic()
+        self.claude_bin = find_claude(settings.claude_bin)
+        self._run = run
+
+    def command(self, system: str) -> list[str]:
+        return [
+            self.claude_bin or "claude",
+            "-p",                                  # print mode: one answer, then exit
+            "--output-format", "json",
+            "--json-schema", json.dumps(DECISION_SCHEMA),
+            "--model", self.settings.model,
+            "--effort", self.settings.effort,
+            "--system-prompt", system,             # replaces Claude Code's coding prompt
+            "--tools", "",                         # no tools at all: no files, no shell, no web
+            "--safe-mode",                         # ignore CLAUDE.md, hooks, plugins, MCP, memory
+            "--strict-mcp-config",
+            "--max-turns", "5",
+            "--no-session-persistence",
+        ]
 
     def decide(self, snapshot: dict, features: dict[str, dict]) -> DecisionResult:
-        import anthropic
-
         system, user = build_prompt(self.settings, snapshot, features, self.strategy_text)
-        meta: dict = {"model": self.settings.model, "effort": self.settings.effort}
-        try:
-            response = self.client.beta.messages.create(
-                model=self.settings.model,
-                max_tokens=16000,
-                # If a safety classifier declines, retry on a fallback model server-side.
-                betas=["server-side-fallback-2026-07-01"],
-                fallbacks="default",
-                output_config={
-                    "effort": self.settings.effort,
-                    # Structured output: the answer must match the Decision schema.
-                    "format": {"type": "json_schema", "schema": DECISION_SCHEMA},
-                },
-                system=system,
-                messages=[{"role": "user", "content": user}],
-            )
-        except anthropic.APIError as e:
-            # Fail closed: no decision means no trades.
-            meta["error"] = f"{type(e).__name__}: {e}"
+        meta: dict = {"via": "claude-code", "model": self.settings.model,
+                      "effort": self.settings.effort}
+        if not self.claude_bin:
+            meta["error"] = ("Claude Code (the claude command) was not found; install it, or "
+                             "set CLAUDE_BIN in .env to its full path")
             return DecisionResult(EMPTY, meta)
 
-        meta["served_by"] = response.model
-        meta["stop_reason"] = response.stop_reason
-        usage = response.usage
-        meta["usage"] = {
-            "input_tokens": getattr(usage, "input_tokens", None),
-            "output_tokens": getattr(usage, "output_tokens", None),
-        }
-        if response.stop_reason == "refusal":
-            details = getattr(response, "stop_details", None)
-            meta["error"] = f"refusal: {getattr(details, 'category', None)}"
-            return DecisionResult(EMPTY, meta)
-        if response.stop_reason == "max_tokens":
-            meta["error"] = "answer was cut off (max_tokens); not trading on a partial answer"
-            return DecisionResult(EMPTY, meta)
-        text = "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
         try:
-            parsed = Decision.model_validate_json(text)
+            with tempfile.TemporaryDirectory(prefix="papertrader-claude-") as tmp:
+                proc = self._run(
+                    self.command(system),
+                    input=user,          # the data goes in on stdin, not as an argument
+                    capture_output=True,
+                    text=True,
+                    cwd=tmp,             # empty folder: no project files or CLAUDE.md nearby
+                    env=child_env(),
+                    timeout=self.settings.claude_timeout_s,
+                )
+        except subprocess.TimeoutExpired:
+            meta["error"] = f"Claude Code took longer than {self.settings.claude_timeout_s}s"
+            return DecisionResult(EMPTY, meta)
+        except OSError as e:
+            meta["error"] = f"could not start Claude Code: {e}"
+            return DecisionResult(EMPTY, meta)
+
+        # Fail closed: anything other than a clean, schema-checked answer means no trades.
+        try:
+            out = json.loads(proc.stdout or "")
+        except json.JSONDecodeError:
+            out = None
+        if not isinstance(out, dict):
+            meta["error"] = (f"Claude Code exited {proc.returncode} without a readable result: "
+                             f"{_tail(proc.stderr) or _tail(proc.stdout)}")
+            return DecisionResult(EMPTY, meta)
+
+        usage = out.get("usage") or {}
+        meta.update({
+            "served_by": list((out.get("modelUsage") or {}).keys()),
+            "subtype": out.get("subtype"),
+            "stop_reason": out.get("stop_reason"),
+            "num_turns": out.get("num_turns"),
+            "duration_ms": out.get("duration_ms"),
+            "usage": {"input_tokens": usage.get("input_tokens"),
+                      "output_tokens": usage.get("output_tokens")},
+        })
+        if (proc.returncode != 0 or out.get("type") != "result" or out.get("is_error")
+                or out.get("subtype") != "success"):
+            detail = out.get("result") if isinstance(out.get("result"), str) else ""
+            meta["error"] = (f"Claude Code did not succeed (exit {proc.returncode}, "
+                             f"{out.get('subtype')}): {_tail(detail) or _tail(proc.stderr)}")
+            return DecisionResult(EMPTY, meta)
+        structured = out.get("structured_output")
+        if not isinstance(structured, dict):
+            meta["error"] = "Claude Code returned no structured answer"
+            return DecisionResult(EMPTY, meta)
+        try:
+            parsed = Decision.model_validate(structured)
         except ValidationError as e:
             meta["error"] = f"could not read Claude's answer: {e.error_count()} schema error(s)"
             return DecisionResult(EMPTY, meta)

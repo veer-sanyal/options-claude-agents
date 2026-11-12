@@ -9,8 +9,9 @@ Each run does five things:
 1. Reads your paper account: equity, cash, positions, open and recent orders.
 2. Pulls daily prices for the watchlist and computes trend numbers in code
    (50- and 20-day averages, 5/21/63-day returns, volatility).
-3. Sends all of that plus `strategy.md` to Claude (`claude-opus-5-5`), which
-   answers with proposed trades in a fixed JSON shape.
+3. Sends all of that plus `strategy.md` to Claude (`claude-opus-5-5`) through
+   Claude Code on your laptop, which answers with proposed trades in a fixed
+   JSON shape. This runs on your Claude subscription; there is no API key.
 4. Runs every proposal through hard limits in code (`papertrader/risk.py`).
    Claude can propose anything; only what passes the limits can be sent.
 5. Logs everything. In a dry run (the default) nothing is sent. With `--trade`,
@@ -46,8 +47,8 @@ Defaults are in `papertrader/config.py`. Override them in `.env`.
 | Drawdown halt | 15% | If equity falls 15% below where the bot started, it stops trading until you run `--reset-halt` |
 | Market hours | always | With `--trade`, nothing is sent while the market is closed |
 
-If Claude errors, refuses, or returns something unreadable, that run makes no
-trades. Any odd number (missing price, negative amount) rejects the trade.
+If Claude errors, refuses, times out, hits your plan's usage limit, or returns
+something unreadable, that run makes no trades. Any odd number (missing price, negative amount) rejects the trade.
 
 ## Setup (about 15 minutes)
 
@@ -62,10 +63,26 @@ trades. Any odd number (missing price, negative amount) rejects the trade.
 
 Use the paper keys only. Do not generate live keys for this.
 
-### 2. Get an Anthropic API key
+### 2. Make sure Claude Code works on your laptop
 
-At console.anthropic.com, create an API key under API Keys. The API is billed
-per use and is separate from a Claude.ai subscription.
+The bot asks Claude through Claude Code (the `claude` command), so it uses
+your Claude subscription and needs no API key. In a terminal:
+
+```bash
+claude --version      # if this fails, install Claude Code first
+claude update         # the bot uses recent flags such as --safe-mode
+claude                # if you are not logged in, type /login, then /exit
+```
+
+How the call is locked down: every tool is switched off (Claude can't read
+files, run commands or browse), your CLAUDE.md files, hooks, plugins and MCP
+servers are ignored (`--safe-mode`), it runs in an empty temporary folder, and
+nothing is saved as a session. Claude only sees the prompt and can only answer
+in the trade JSON shape. Your Alpaca keys are removed from its environment.
+
+One catch: if `ANTHROPIC_API_KEY` is set in your shell, Claude Code would bill
+that API account instead of your subscription. The bot removes it from the
+Claude Code call so this can't happen by accident.
 
 ### 3. Install
 
@@ -84,8 +101,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Open `.env` and paste in your Alpaca paper key id and secret and your Anthropic
-key. `.env` is gitignored, so it never gets committed. Don't paste keys anywhere
+Open `.env` and paste in your Alpaca paper key id and secret. `.env` is gitignored, so it never gets committed. Don't paste keys anywhere
 else (not in code, not in chat).
 
 ### 5. Check everything works without keys
@@ -106,9 +122,10 @@ Start with a few dry runs and read what Claude proposes. When it looks sane,
 add `--trade`. Run it during market hours (9:30 a.m. to 4 p.m. Eastern); with
 `--trade` it will not send orders when the market is closed.
 
-Each run makes one Claude call. Expect very roughly 5 to 25 cents per run at
-`effort=high`; check the token counts in the log to see the real figure, and
-set `CLAUDE_EFFORT=medium` in `.env` to make it cheaper.
+Each run makes one Claude call (usually a minute or two at `effort=high`),
+which counts toward your Claude plan's usage like any other Claude Code
+message. Once a day is small. To use less, set `CLAUDE_EFFORT=medium` in `.env`.
+If you hit your plan's limit, that run trades nothing and the log says why.
 
 ## Running it on a schedule (your laptop)
 
@@ -138,6 +155,20 @@ Full Disk Access, click +, press Cmd+Shift+G, type `/usr/sbin/cron`, and add it.
 After the first scheduled weekday, check that `logs/cron.log` exists and that
 `python report.py` shows the run. If neither appears, cron was blocked.
 
+Two things can stop Claude Code under cron, because cron starts with almost
+no environment:
+
+- **It can't find `claude`.** Run `which claude` in a normal terminal and put
+  that full path in `.env` as `CLAUDE_BIN=...`.
+- **It isn't logged in.** On a Mac the login lives in the Keychain, which a
+  cron job may not be able to read. If the log says Claude Code isn't logged
+  in, run `claude setup-token` in a terminal (it needs a Pro or Max plan). It
+  prints a long-lived token; paste it into `.env` as
+  `CLAUDE_CODE_OAUTH_TOKEN=...`. Treat it like a password: it stays in `.env`,
+  which is gitignored.
+
+Check both by running the exact cron command once by hand first.
+
 To stop the schedule, run `crontab -e` again and delete the line.
 
 ## Reading the results
@@ -145,7 +176,7 @@ To stop the schedule, run `crontab -e` again and delete the line.
 - `logs/latest.md`: the last run in plain English (Claude's view, orders sent,
   anything the limits rejected and why).
 - `logs/runs.jsonl`: every run, one JSON object per line. It holds the account
-  snapshot, every computed number Claude saw, Claude's full answer, token usage,
+  snapshot, every computed number Claude saw, Claude's full answer, which model answered,
   what was approved or rejected, and Alpaca's response to each order.
 - `python report.py`: equity over time, change since the bot started, and every
   order sent.
@@ -193,7 +224,7 @@ papertrader/config.py  limits and settings
 papertrader/safety.py  paper-only guards
 papertrader/broker.py  Alpaca reads and order submission (plus a mock)
 papertrader/features.py trend numbers computed in code
-papertrader/decide.py  the Claude call and the answer format
+papertrader/decide.py  the Claude Code call and the answer format
 papertrader/risk.py    the hard limits
 papertrader/runner.py  one full run
 papertrader/journal.py the log

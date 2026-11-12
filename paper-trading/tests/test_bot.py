@@ -253,68 +253,110 @@ def test_halt_persists_across_runs(settings):
 
 
 # --------------------------------------------------- Claude call handling
-class FakeMessages:
-    def __init__(self, response=None, exc=None):
-        self.response, self.exc, self.kwargs = response, exc, None
+# Claude is reached through the Claude Code CLI. These tests replace the
+# subprocess call with a fake, so nothing is actually run.
+import json as _json  # noqa: E402
+import subprocess as _subprocess  # noqa: E402
 
-    def create(self, **kwargs):
-        self.kwargs = kwargs
+
+class FakeRun:
+    def __init__(self, stdout="", returncode=0, stderr="", exc=None):
+        self.stdout, self.returncode, self.stderr, self.exc = stdout, returncode, stderr, exc
+        self.args = self.kwargs = None
+
+    def __call__(self, args, **kwargs):
+        self.args, self.kwargs = args, kwargs
         if self.exc:
             raise self.exc
-        return self.response
+        return SimpleNamespace(stdout=self.stdout, stderr=self.stderr, returncode=self.returncode)
 
 
-def make_decider(settings, fake):
+def cc_result(structured=None, subtype="success", is_error=False, result=""):
+    out = {"type": "result", "subtype": subtype, "is_error": is_error, "result": result,
+           "num_turns": 2, "duration_ms": 1000, "stop_reason": "end_turn",
+           "usage": {"input_tokens": 1, "output_tokens": 1},
+           "modelUsage": {"claude-opus-5-5": {}}}
+    if structured is not None:
+        out["structured_output"] = structured
+    return _json.dumps(out)
+
+
+def make_decider(settings, fake, claude_bin="/usr/local/bin/claude"):
     d = ClaudeDecider.__new__(ClaudeDecider)
-    d.settings, d.strategy_text = settings, "strategy"
-    d.client = SimpleNamespace(beta=SimpleNamespace(messages=fake))
+    d.settings, d.strategy_text, d.claude_bin, d._run = settings, "strategy", claude_bin, fake
     return d
 
 
-def fake_response(text, stop_reason="end_turn"):
-    return SimpleNamespace(model="claude-opus-5-5", stop_reason=stop_reason,
-                           usage=SimpleNamespace(input_tokens=1, output_tokens=1),
-                           stop_details=SimpleNamespace(category="other"),
-                           content=[SimpleNamespace(type="text", text=text)])
+GOOD = Decision(market_view="v", notes="", trades=[trade("AAPL", "buy", 100)])
 
 
-def test_claude_refusal_means_no_trades(settings):
-    r = make_decider(settings, FakeMessages(fake_response("", "refusal"))).decide(
-        MockBroker().snapshot(), {})
-    assert r.decision.trades == [] and "refusal" in r.meta["error"]
+def decide_with(settings, fake, **kw):
+    return make_decider(settings, fake, **kw).decide(MockBroker().snapshot(), {})
 
 
-def test_claude_cut_off_means_no_trades(settings):
-    r = make_decider(settings, FakeMessages(fake_response('{"market_view": "x", "tra', "max_tokens"))
-                     ).decide(MockBroker().snapshot(), {})
-    assert r.decision.trades == [] and "max_tokens" in r.meta["error"]
-    assert r.meta["usage"]["output_tokens"] == 1
+def test_claude_code_good_answer(settings):
+    r = decide_with(settings, FakeRun(cc_result(GOOD.model_dump())))
+    assert r.decision == GOOD and "error" not in r.meta
+    assert r.meta["served_by"] == ["claude-opus-5-5"]
 
 
-def test_claude_garbage_means_no_trades(settings):
-    r = make_decider(settings, FakeMessages(fake_response("not json"))).decide(
-        MockBroker().snapshot(), {})
-    assert r.decision.trades == [] and "could not read" in r.meta["error"]
+def test_claude_code_command_is_locked_down(settings, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "secret")
+    fake = FakeRun(cc_result(GOOD.model_dump()))
+    decide_with(settings, fake)
+    a = fake.args
+    assert a[0] == "/usr/local/bin/claude" and "-p" in a
+    assert a[a.index("--tools") + 1] == ""                      # no tools at all
+    assert a[a.index("--output-format") + 1] == "json"
+    assert _json.loads(a[a.index("--json-schema") + 1])["title"] == "Decision"
+    assert a[a.index("--model") + 1] == "claude-opus-5-5"
+    assert a[a.index("--effort") + 1] == "high"
+    assert "--safe-mode" in a and "--no-session-persistence" in a
+    # The account data goes in on stdin; secrets never reach the child process.
+    assert "watchlist_features" in fake.kwargs["input"]
+    env = fake.kwargs["env"]
+    assert "ANTHROPIC_API_KEY" not in env and "ALPACA_SECRET_KEY" not in env
+    assert fake.kwargs["timeout"] == settings.claude_timeout_s
+    assert fake.kwargs["cwd"] != str(HERE)
 
 
-def test_claude_api_error_means_no_trades(settings):
-    import anthropic
-    import httpx2
+@pytest.mark.parametrize("fake", [
+    FakeRun("", returncode=1, stderr="Invalid API key \u00b7 Please run /login"),  # not logged in
+    FakeRun("not json"),
+    FakeRun(_json.dumps(["a list"])),
+    FakeRun(cc_result(GOOD.model_dump(), subtype="error_max_structured_output_retries",
+                      is_error=True)),
+    FakeRun(cc_result(GOOD.model_dump(), is_error=True, result="usage limit reached")),
+    FakeRun(cc_result(GOOD.model_dump()), returncode=1),
+    FakeRun(cc_result(None)),                                   # no structured answer
+    FakeRun(cc_result({"market_view": "x"})),                   # missing fields
+    FakeRun(cc_result({**GOOD.model_dump(), "extra": 1})),      # unexpected field
+    FakeRun(cc_result({**GOOD.model_dump(), "trades": [{"symbol": "AAPL", "action": "short",
+                                                         "dollars": 5, "reason": "r"}]})),
+    FakeRun(exc=_subprocess.TimeoutExpired("claude", 600)),
+    FakeRun(exc=FileNotFoundError("claude")),
+])
+def test_claude_code_problems_mean_no_trades(settings, fake):
+    r = decide_with(settings, fake)
+    assert r.decision.trades == [] and r.meta.get("error")
 
-    err = anthropic.APIConnectionError(request=httpx2.Request("POST", "https://example.invalid"))
-    r = make_decider(settings, FakeMessages(exc=err)).decide(MockBroker().snapshot(), {})
-    assert r.decision.trades == [] and "error" in r.meta
+
+def test_claude_code_missing_means_no_trades(settings):
+    fake = FakeRun(cc_result(GOOD.model_dump()))
+    r = decide_with(settings, fake, claude_bin=None)
+    assert r.decision.trades == [] and "not found" in r.meta["error"]
+    assert fake.args is None  # never tried to run anything
 
 
-def test_claude_request_shape(settings):
-    parsed = Decision(market_view="v", notes="", trades=[trade("AAPL", "buy", 100)])
-    fake = FakeMessages(fake_response(parsed.model_dump_json()))
-    r = make_decider(settings, fake).decide(MockBroker().snapshot(), {})
-    assert r.decision == parsed
-    assert fake.kwargs["model"] == "claude-opus-5-5"
-    assert fake.kwargs["output_config"]["effort"] == "high"
-    assert fake.kwargs["output_config"]["format"]["type"] == "json_schema"
-    assert "thinking" not in fake.kwargs  # Opus 5.5: thinking is always on; effort controls depth
+def test_find_claude_respects_claude_bin(tmp_path):
+    from papertrader.decide import find_claude
+
+    exe = tmp_path / "claude"
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    assert find_claude(str(exe)) == str(exe)
+    assert find_claude(str(tmp_path / "nope")) is None
 
 
 # ------------------------------------------------------- round 1 review fixes

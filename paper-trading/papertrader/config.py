@@ -52,9 +52,12 @@ class Settings:
     max_drawdown_pct: float     # if equity falls this far below the starting equity: halt everything
     min_order_dollars: float    # Alpaca's fractional minimum is $1
 
-    # Claude settings.
+    # Claude settings. Claude is reached through Claude Code (the `claude` command)
+    # on your subscription; there is no API key.
     model: str
     effort: str
+    claude_bin: str | None = None   # full path to `claude`, if it is not on PATH (cron)
+    claude_timeout_s: int = 600     # give up (and trade nothing) after this long
 
     # Where logs and state live.
     log_dir: Path = field(default=PROJECT_DIR / "logs")
@@ -78,6 +81,8 @@ def load_settings() -> Settings:
         min_order_dollars=_float("MIN_ORDER_DOLLARS", 1.0),
         model=os.environ.get("CLAUDE_MODEL", "claude-opus-5-5"),
         effort=os.environ.get("CLAUDE_EFFORT", "high"),
+        claude_bin=os.environ.get("CLAUDE_BIN") or None,
+        claude_timeout_s=_int("CLAUDE_TIMEOUT_S", 600),
     )
     validate(settings)
     return settings
@@ -106,6 +111,8 @@ def validate(s: Settings) -> None:
         problems.append("MAX_ORDERS_PER_RUN cannot be negative")
     if s.min_order_dollars < 1:
         problems.append("MIN_ORDER_DOLLARS must be at least 1 (Alpaca's fractional minimum)")
+    if s.claude_timeout_s <= 0:
+        problems.append("CLAUDE_TIMEOUT_S must be positive")
     if s.effort not in ("low", "medium", "high", "xhigh", "max"):
         problems.append("CLAUDE_EFFORT must be one of low, medium, high, xhigh, max")
     if problems:
