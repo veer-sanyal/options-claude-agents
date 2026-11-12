@@ -71,17 +71,22 @@ def main(argv: list[str] | None = None) -> int:
             check_environment()
             key, secret = os.environ.get("ALPACA_API_KEY"), os.environ.get("ALPACA_SECRET_KEY")
             if not key or not secret:
-                print("Missing ALPACA_API_KEY / ALPACA_SECRET_KEY. Put your PAPER keys in "
-                      "paper-trading/.env (see README.md), or use --mock.", file=sys.stderr)
+                msg = ("Missing ALPACA_API_KEY / ALPACA_SECRET_KEY. Put your PAPER keys in "
+                       "paper-trading/.env (see README.md), or use --mock.")
+                print(msg, file=sys.stderr)
+                log_early_failure(settings, args, msg)
                 return 2
             if not args.reset_halt and not find_claude(settings.claude_bin):
                 where = f"at CLAUDE_BIN={settings.claude_bin}" if settings.claude_bin else "on PATH"
-                print(f"Claude Code (the claude command) was not found {where}. Install it and "
-                      "log in (see README.md), or use --mock.", file=sys.stderr)
+                msg = (f"Claude Code (the claude command) was not found {where}. Install it and "
+                       "log in (see README.md), or use --mock.")
+                print(msg, file=sys.stderr)
+                log_early_failure(settings, args, msg)
                 return 2
             broker = AlpacaBroker(key, secret)
         except LiveTradingRefused as e:
             print(f"REFUSING TO START: {e}", file=sys.stderr)
+            log_early_failure(settings, args, f"refused to start: {e}")
             return 2
         mode = "paper-trade" if args.trade else "dry-run"
 
@@ -136,6 +141,15 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def log_early_failure(settings, args, msg: str) -> None:
+    """So a scheduled run that can't even start still shows up in report.py."""
+    if args.reset_halt:
+        return
+    from papertrader.runner import log_failed_run
+
+    log_failed_run(settings, "paper-trade" if args.trade else "dry-run", msg)
+
+
 def check_claude(settings) -> int:
     from papertrader.decide import ClaudeDecider
 
@@ -151,7 +165,10 @@ def check_claude(settings) -> int:
         print(f"FAILED: {meta['error']}", file=sys.stderr)
         return 1
     print(f"OK: Claude Code answered (served by {', '.join(meta.get('served_by') or ['?'])}, "
-          f"{meta.get('duration_ms')} ms). Scheduled runs should work in this environment.")
+          f"{meta.get('duration_ms')} ms).")
+    if sys.platform == "darwin" and not os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        print("Note: this used your Keychain login, which cron often can't read. For "
+              "scheduled runs, set CLAUDE_CODE_OAUTH_TOKEN in .env (see README.md).")
     return 0
 
 

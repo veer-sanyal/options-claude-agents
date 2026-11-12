@@ -76,6 +76,10 @@ claude                # opens Claude Code; if it asks you to log in, follow the
                       # prompts with your Claude account, then type /exit
 ```
 
+When it asks how to log in, pick your Claude subscription (Pro or Max), not an
+Anthropic Console account; the Console option bills the API per use. Inside
+Claude Code, `/status` shows which one you are on.
+
 Later, after installing (step 3), `python run.py --check-claude` makes one tiny
 test call and prints OK or the exact problem. It touches no Alpaca account.
 
@@ -185,10 +189,24 @@ cd $HOME/options-claude-agents/paper-trading
 env -i HOME=$HOME PATH=/usr/bin:/bin .venv/bin/python run.py --check-claude
 ```
 
-It should print OK. A normal terminal can't show this, because it has your
-full PATH and Keychain access. (Running the cron line itself by hand doesn't
-prove much either: outside market hours `--trade` skips Claude, and inside
-market hours it sends real paper orders.)
+It should print OK. This catches a missing `claude` or `node`, but not a
+Keychain problem: anything started from Terminal can still read your Keychain,
+so it only proves the login works for cron once `CLAUDE_CODE_OAUTH_TOKEN` is
+set (the check prints a note if it isn't). If it fails with `env: node`, the
+simplest fix is to reinstall Claude Code with the native installer.
+
+The surest test is to let cron run the check once. Add a temporary line a few
+minutes ahead (here 9:40 p.m.), wait, then read the log and delete the line:
+
+```
+40 21 * * * cd $HOME/options-claude-agents/paper-trading && mkdir -p logs && .venv/bin/python run.py --check-claude >> logs/cron.log 2>&1
+```
+
+(Running the trade line itself by hand doesn't prove much: outside market hours
+`--trade` skips Claude, and inside market hours it sends real paper orders.)
+
+The setup-token token lasts a long time but not forever. If `logs/cron.log`
+starts showing a login error, run `claude setup-token` again and replace it.
 
 To stop the schedule, run `crontab -e` again and delete the line.
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -140,19 +141,32 @@ def find_claude(configured: str | None = None) -> str | None:
         path = Path(c).expanduser()
         if _executable(path):
             return str(path)
-    for c in sorted(glob.glob(os.path.expanduser(NVM_GLOB)), reverse=True):
+    def version_key(path: str) -> tuple[int, ...]:
+        m = re.search(r"/v(\d+)\.(\d+)\.(\d+)/", path)
+        return tuple(int(x) for x in m.groups()) if m else (0,)
+
+    for c in sorted(glob.glob(os.path.expanduser(NVM_GLOB)), key=version_key, reverse=True):
         if _executable(Path(c)):
-            return c
+            return c   # newest nvm Node version first
     return None
 
 
 def child_env(claude_bin: str | None = None) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k in CHILD_ENV_ALLOW}
     path = env.get("PATH") or "/usr/bin:/bin:/usr/sbin:/sbin"
+    # An npm-installed claude starts with `#!/usr/bin/env node`, so node must be
+    # findable, and cron's PATH would not have it. Put the folders that usually
+    # hold node in front: claude's own folder (nvm), the folder its symlink points
+    # into, and wherever `node` is found right now.
+    extra: list[str] = []
     if claude_bin:
-        # An npm-installed claude starts with `#!/usr/bin/env node`, so node must be
-        # findable; it sits next to claude. Cron's PATH would not have it.
-        path = f"{Path(claude_bin).parent}{os.pathsep}{path}"
+        extra += [str(Path(claude_bin).parent), str(Path(claude_bin).resolve().parent)]
+    node = shutil.which("node", path=path)
+    if node:
+        extra.append(str(Path(node).parent))
+    for d in reversed(list(dict.fromkeys(extra))):
+        if d not in path.split(os.pathsep):
+            path = f"{d}{os.pathsep}{path}"
     env["PATH"] = path
     return env
 

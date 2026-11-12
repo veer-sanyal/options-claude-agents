@@ -29,7 +29,9 @@ from papertrader.state import State  # noqa: E402
 @pytest.fixture
 def settings(tmp_path, monkeypatch):
     for var in ("WATCHLIST", "MAX_POSITION_PCT", "MAX_INVESTED_PCT", "MAX_ORDER_DOLLARS",
-                "MAX_ORDERS_PER_RUN", "DAILY_LOSS_LIMIT_PCT", "MAX_DRAWDOWN_PCT"):
+                "MAX_ORDERS_PER_RUN", "DAILY_LOSS_LIMIT_PCT", "MAX_DRAWDOWN_PCT",
+                "MIN_ORDER_DOLLARS", "CLAUDE_MODEL", "CLAUDE_EFFORT", "CLAUDE_BIN",
+                "CLAUDE_TIMEOUT_S"):
         monkeypatch.delenv(var, raising=False)
     s = load_settings()
     return dataclasses.replace(s, log_dir=tmp_path / "logs", state_dir=tmp_path / "state")
@@ -338,7 +340,7 @@ def test_claude_code_command_is_locked_down(settings, monkeypatch):
     env = fake.kwargs["env"]
     assert set(env) <= set(CHILD_ENV_ALLOW)
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sub-token"
-    assert env["PATH"].split(":")[0] == "/usr/local/bin"         # node next to claude is findable
+    assert "/usr/local/bin" in env["PATH"].split(":")           # node next to claude is findable
     assert fake.kwargs["timeout"] == settings.claude_timeout_s
 
 
@@ -346,6 +348,8 @@ def test_claude_code_command_is_locked_down(settings, monkeypatch):
     FakeRun("", returncode=1, stderr="Invalid API key \u00b7 Please run /login"),  # not logged in
     FakeRun("not json"),
     FakeRun(_json.dumps(["a list"])),
+    FakeRun("warning: update available\n" + cc_result(GOOD.model_dump())),  # text before JSON
+    FakeRun(cc_result(GOOD.model_dump()).replace('"type": "result"', '"type": "assistant"')),
     FakeRun(cc_result(GOOD.model_dump(), subtype="error_max_structured_output_retries",
                       is_error=True)),
     FakeRun(cc_result(GOOD.model_dump(), is_error=True, result="usage limit reached")),
@@ -540,3 +544,33 @@ def test_run_exits_nonzero_when_claude_step_fails(tmp_path, monkeypatch):
     assert run_module.main([]) == 1
     rec["claude"] = {}                       # same run with a clean Claude step exits 0,
     assert run_module.main([]) == 0          # so the 1 above came from the Claude error
+
+
+def test_nvm_fallback_picks_newest_version(tmp_path, monkeypatch):
+    from papertrader import decide
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(decide.shutil, "which", lambda *a, **k: None)
+    monkeypatch.setattr(decide, "CLAUDE_BIN_CANDIDATES", ())
+    for v in ("v9.11.2", "v22.3.0", "v20.10.0"):
+        exe = tmp_path / f".nvm/versions/node/{v}/bin/claude"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("#!/usr/bin/env node\n")
+        exe.chmod(0o755)
+    assert "/v22.3.0/" in decide.find_claude()
+
+
+def test_early_exit_is_logged(tmp_path, monkeypatch):
+    import run as run_module
+    from papertrader.journal import read_runs
+
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
+    monkeypatch.setattr(run_module, "load_dotenv_file", lambda: None)
+    import papertrader.config as cfg
+    real = cfg.load_settings
+    monkeypatch.setattr(run_module, "load_settings",
+                        lambda: dataclasses.replace(real(), log_dir=tmp_path, state_dir=tmp_path))
+    assert run_module.main(["--trade"]) == 2
+    runs = read_runs(tmp_path)
+    assert len(runs) == 1 and "ALPACA_API_KEY" in runs[0]["errors"][0]
