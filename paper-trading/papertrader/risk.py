@@ -146,6 +146,9 @@ def apply_limits(
             if qty <= 0:
                 reject(t, "sell amount rounds to zero shares")
                 continue
+            if qty < available and qty * price < settings.min_order_dollars:
+                reject(t, f"sell is under the ${settings.min_order_dollars:,.2f} minimum")
+                continue
             res.approved.append(PlannedOrder(
                 symbol=sym, side="sell", qty=qty, est_dollars=qty * price, reason=t.reason,
                 client_order_id=f"{run_id}-{len(res.approved) + 1}"[:48],
@@ -173,7 +176,8 @@ def apply_limits(
             qty = None
             cost = notional
         else:
-            whole = math.floor(allowed / price)
+            # 1% cushion: a market fill can land a little above the last trade price.
+            whole = math.floor(allowed * 0.99 / price)
             if whole < 1:
                 reject(t, "not fractionable and one share costs more than the room left")
                 continue

@@ -6,6 +6,7 @@ Percentages are fractions: 0.10 means 10%.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -75,6 +76,12 @@ def load_settings() -> Settings:
 def validate(s: Settings) -> None:
     """Fail fast on settings that would make the limits meaningless."""
     problems = []
+    for name in ("max_position_pct", "max_invested_pct", "max_order_dollars",
+                 "daily_loss_limit_pct", "max_drawdown_pct", "min_order_dollars"):
+        if not math.isfinite(getattr(s, name)):
+            problems.append(f"{name.upper()} must be a normal number (got {getattr(s, name)})")
+    if problems:
+        raise ValueError("Bad settings: " + "; ".join(problems))
     if not s.watchlist:
         problems.append("WATCHLIST is empty")
     for name in ("max_position_pct", "max_invested_pct", "daily_loss_limit_pct", "max_drawdown_pct"):

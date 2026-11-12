@@ -39,6 +39,21 @@ class RunLock:
         self.path.unlink(missing_ok=True)
 
 
+def log_failed_run(settings: Settings, mode_label: str, error: str) -> None:
+    """Record a run that crashed, so report.py shows the failed day."""
+    now = datetime.now(timezone.utc)
+    append_run(settings.log_dir, {
+        "run_id": "pt-" + now.strftime("%Y%m%d%H%M%S"),
+        "time": now.isoformat(),
+        "mode": mode_label,
+        "account": {},
+        "approved": [],
+        "rejected": [],
+        "results": None,
+        "errors": [f"run failed: {error}"],
+    })
+
+
 def run_once(broker, decider, settings: Settings, state: State, *, trade: bool,
              mode_label: str) -> dict:
     now = datetime.now(timezone.utc)
@@ -58,6 +73,10 @@ def run_once(broker, decider, settings: Settings, state: State, *, trade: bool,
     block_all, _, _ = account_gate(snapshot, settings, state.start_equity, state.halted)
     if block_all:
         result = DecisionResult(EMPTY, {"skipped": block_all})
+    elif trade and not snapshot["clock"]["is_open"]:
+        # Nothing could be sent anyway, so don't pay for a Claude call.
+        result = DecisionResult(EMPTY, {"skipped": "market closed"})
+        errors.append("market is closed; skipped Claude and sent nothing (run during market hours)")
     else:
         result = decider.decide(snapshot, features)
     if result.meta.get("error"):

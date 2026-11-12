@@ -99,8 +99,11 @@ def main(argv: list[str] | None = None) -> int:
     except LiveTradingRefused as e:
         print(f"REFUSING: {e}", file=sys.stderr)
         return 2
-    except RuntimeError as e:
-        print(e, file=sys.stderr)
+    except Exception as e:  # Alpaca/network errors, a bad symbol, another run holding the lock
+        msg = f"{type(e).__name__}: {e}"
+        print(f"Run failed: {msg}", file=sys.stderr)
+        from papertrader.runner import log_failed_run
+        log_failed_run(settings, mode, msg)
         return 1
 
     print((settings.log_dir / "latest.md").read_text())

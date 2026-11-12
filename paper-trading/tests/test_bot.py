@@ -257,7 +257,7 @@ class FakeMessages:
     def __init__(self, response=None, exc=None):
         self.response, self.exc, self.kwargs = response, exc, None
 
-    def parse(self, **kwargs):
+    def create(self, **kwargs):
         self.kwargs = kwargs
         if self.exc:
             raise self.exc
@@ -271,27 +271,129 @@ def make_decider(settings, fake):
     return d
 
 
+def fake_response(text, stop_reason="end_turn"):
+    return SimpleNamespace(model="claude-opus-5-5", stop_reason=stop_reason,
+                           usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+                           stop_details=SimpleNamespace(category="other"),
+                           content=[SimpleNamespace(type="text", text=text)])
+
+
 def test_claude_refusal_means_no_trades(settings):
-    resp = SimpleNamespace(model="m", stop_reason="refusal", usage=None,
-                           stop_details=SimpleNamespace(category="other"), parsed_output=None)
-    r = make_decider(settings, FakeMessages(resp)).decide(MockBroker().snapshot(), {})
+    r = make_decider(settings, FakeMessages(fake_response("", "refusal"))).decide(
+        MockBroker().snapshot(), {})
     assert r.decision.trades == [] and "refusal" in r.meta["error"]
 
 
-def test_claude_error_means_no_trades(settings):
-    r = make_decider(settings, FakeMessages(exc=RuntimeError("boom"))).decide(
+def test_claude_cut_off_means_no_trades(settings):
+    r = make_decider(settings, FakeMessages(fake_response('{"market_view": "x", "tra', "max_tokens"))
+                     ).decide(MockBroker().snapshot(), {})
+    assert r.decision.trades == [] and "max_tokens" in r.meta["error"]
+    assert r.meta["usage"]["output_tokens"] == 1
+
+
+def test_claude_garbage_means_no_trades(settings):
+    r = make_decider(settings, FakeMessages(fake_response("not json"))).decide(
         MockBroker().snapshot(), {})
+    assert r.decision.trades == [] and "could not read" in r.meta["error"]
+
+
+def test_claude_api_error_means_no_trades(settings):
+    import anthropic
+    import httpx2
+
+    err = anthropic.APIConnectionError(request=httpx2.Request("POST", "https://example.invalid"))
+    r = make_decider(settings, FakeMessages(exc=err)).decide(MockBroker().snapshot(), {})
     assert r.decision.trades == [] and "error" in r.meta
 
 
 def test_claude_request_shape(settings):
     parsed = Decision(market_view="v", notes="", trades=[trade("AAPL", "buy", 100)])
-    resp = SimpleNamespace(model=settings.model, stop_reason="end_turn",
-                           usage=SimpleNamespace(input_tokens=1, output_tokens=1),
-                           parsed_output=parsed)
-    fake = FakeMessages(resp)
+    fake = FakeMessages(fake_response(parsed.model_dump_json()))
     r = make_decider(settings, fake).decide(MockBroker().snapshot(), {})
     assert r.decision == parsed
     assert fake.kwargs["model"] == "claude-opus-5-5"
-    assert fake.kwargs["output_format"] is Decision
+    assert fake.kwargs["output_config"]["effort"] == "high"
+    assert fake.kwargs["output_config"]["format"]["type"] == "json_schema"
     assert "thinking" not in fake.kwargs  # Opus 5.5: thinking is always on; effort controls depth
+
+
+# ------------------------------------------------------- round 1 review fixes
+@pytest.mark.parametrize("value", ["nan", "inf"])
+def test_non_finite_settings_rejected(monkeypatch, value):
+    monkeypatch.setenv("MAX_ORDER_DOLLARS", value)
+    with pytest.raises(ValueError):
+        load_settings()
+
+
+def test_tiny_partial_sell_rejected(settings):
+    res, _ = limits(Decision(market_view="", notes="", trades=[trade("MSFT", "sell", 0.30)]),
+                    MockBroker(), settings)
+    assert not res.approved and "minimum" in res.rejected[0]["why"]
+
+
+def test_closed_market_with_trade_skips_claude(settings):
+    class Boom:
+        def decide(self, *a):
+            raise AssertionError("Claude should not be called")
+    b = MockBroker(market_open=False)
+    rec = run_once(b, Boom(), settings, State(settings.state_dir), trade=True, mode_label="mock")
+    assert rec["claude"]["skipped"] == "market closed" and b.submitted == []
+
+
+def test_failed_run_is_logged(settings):
+    from papertrader.journal import read_runs
+    from papertrader.runner import log_failed_run
+    log_failed_run(settings, "dry-run", "APIError: boom")
+    runs = read_runs(settings.log_dir)
+    assert runs and "boom" in runs[-1]["errors"][0]
+
+
+# --------------------------------------------- AlpacaBroker with fake SDK objects
+def test_alpaca_broker_snapshot_and_submit_offline(monkeypatch):
+    """Runs AlpacaBroker.snapshot() and submit() against the real SDK request classes
+    with a fake trading client, so no network call or order happens."""
+    from datetime import datetime, timezone
+
+    from alpaca.trading.requests import MarketOrderRequest
+
+    from papertrader.broker import AlpacaBroker, PlannedOrder
+
+    now = datetime.now(timezone.utc)
+    acct = SimpleNamespace(status="ACTIVE", equity="100000", last_equity="99000", cash="50000",
+                           buying_power="200000", long_market_value="50000", trading_blocked=False,
+                           account_blocked=False, trade_suspended_by_user=False,
+                           pattern_day_trader=False, daytrade_count=0)
+    pos = SimpleNamespace(symbol="MSFT", side="long", qty="10", qty_available="10",
+                          avg_entry_price="400", current_price="420", market_value="4200",
+                          unrealized_plpc="0.05", asset_class="us_equity")
+    sent = []
+
+    class FakeTrading:
+        _base_url = safety.PAPER_BASE_URL
+        _sandbox = True
+
+        def get_account(self): return acct
+        def get_clock(self): return SimpleNamespace(is_open=True, timestamp=now, next_open=now,
+                                                    next_close=now)
+        def get_all_positions(self): return [pos]
+        def get_orders(self, filter=None): return []
+        def submit_order(self, order_data):
+            sent.append(order_data)
+            return SimpleNamespace(id="abc", status="accepted", symbol=order_data.symbol)
+
+    b = AlpacaBroker.__new__(AlpacaBroker)
+    b.trading = FakeTrading()
+    snap = b.snapshot()
+    assert snap["account"]["equity"] == 100000.0 and snap["positions"][0]["qty_available"] == 10.0
+
+    out = b.submit(PlannedOrder(symbol="AAPL", side="buy", est_dollars=123.45, reason="t",
+                                notional=123.45, client_order_id="pt-1-1"))
+    assert out["status"] == "accepted"
+    req = sent[0]
+    assert isinstance(req, MarketOrderRequest) and req.notional == 123.45 and req.qty is None
+    assert str(req.time_in_force.value) == "day"
+
+    b.trading._base_url = "https://api.alpaca.markets"  # simulate a live client
+    with pytest.raises(safety.LiveTradingRefused):
+        b.submit(PlannedOrder(symbol="AAPL", side="buy", est_dollars=1, reason="t", notional=1.0))
+    assert len(sent) == 1

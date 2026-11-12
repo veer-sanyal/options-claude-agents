@@ -11,7 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from anthropic import transform_schema
+from pydantic import BaseModel, Field, ValidationError
 
 from .config import PROJECT_DIR, Settings
 
@@ -38,6 +39,7 @@ class DecisionResult:
 
 
 EMPTY = Decision(market_view="", trades=[], notes="")
+DECISION_SCHEMA = transform_schema(Decision)
 
 OUTPUT_RULES = """
 You are the decision step of a paper-trading bot (fake money, Alpaca paper account).
@@ -101,23 +103,23 @@ class ClaudeDecider:
         system, user = build_prompt(self.settings, snapshot, features, self.strategy_text)
         meta: dict = {"model": self.settings.model, "effort": self.settings.effort}
         try:
-            response = self.client.beta.messages.parse(
+            response = self.client.beta.messages.create(
                 model=self.settings.model,
                 max_tokens=16000,
                 # If a safety classifier declines, retry on a fallback model server-side.
                 betas=["server-side-fallback-2026-07-01"],
                 fallbacks="default",
-                output_config={"effort": self.settings.effort},
+                output_config={
+                    "effort": self.settings.effort,
+                    # Structured output: the answer must match the Decision schema.
+                    "format": {"type": "json_schema", "schema": DECISION_SCHEMA},
+                },
                 system=system,
                 messages=[{"role": "user", "content": user}],
-                output_format=Decision,
             )
         except anthropic.APIError as e:
             # Fail closed: no decision means no trades.
             meta["error"] = f"{type(e).__name__}: {e}"
-            return DecisionResult(EMPTY, meta)
-        except Exception as e:  # e.g. the answer did not match the Decision schema
-            meta["error"] = f"could not read Claude's answer: {type(e).__name__}: {e}"
             return DecisionResult(EMPTY, meta)
 
         meta["served_by"] = response.model
@@ -134,9 +136,11 @@ class ClaudeDecider:
         if response.stop_reason == "max_tokens":
             meta["error"] = "answer was cut off (max_tokens); not trading on a partial answer"
             return DecisionResult(EMPTY, meta)
-        parsed = response.parsed_output
-        if parsed is None:
-            meta["error"] = "no parsable decision in the response"
+        text = "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
+        try:
+            parsed = Decision.model_validate_json(text)
+        except ValidationError as e:
+            meta["error"] = f"could not read Claude's answer: {e.error_count()} schema error(s)"
             return DecisionResult(EMPTY, meta)
         return DecisionResult(parsed, meta)
 

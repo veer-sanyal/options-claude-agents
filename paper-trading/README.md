@@ -127,9 +127,16 @@ and add one line (change the path to where the repo lives on your laptop):
 
 That runs at 10:00 a.m. Monday to Friday **in your laptop's time zone**. In
 Indiana (Eastern) that is 30 minutes after the open. If your laptop is on
-Pacific time, use `30 7 * * 1-5` instead. The laptop has to be awake at that
+Pacific time, use `0 7 * * 1-5` instead. The laptop has to be awake at that
 time; if it's asleep, that day's run is skipped, which is harmless. Market
 holidays are handled too: the run sees the market is closed and sends nothing.
+
+Mac note: macOS blocks cron from reading folders like Desktop, Documents and
+Downloads. If the repo lives in one of those, either move it (for example to
+`~/code/`) or give cron Full Disk Access: System Settings > Privacy & Security >
+Full Disk Access, click +, press Cmd+Shift+G, type `/usr/sbin/cron`, and add it.
+After the first scheduled weekday, check that `logs/cron.log` exists and that
+`python report.py` shows the run. If neither appears, cron was blocked.
 
 To stop the schedule, run `crontab -e` again and delete the line.
 

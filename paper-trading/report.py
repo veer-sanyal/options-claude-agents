@@ -28,11 +28,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"No runs logged yet in {log_dir}/runs.jsonl")
         return 0
 
-    start = next((r["start_equity"] for r in runs if r.get("start_equity")), None)
     print(f"{'time (UTC)':<20} {'mode':<12} {'equity':>12} {'vs start':>9} {'orders':>6}  notes")
     for r in runs:
         eq = (r.get("account") or {}).get("equity") or 0.0
-        vs = f"{eq / start - 1:+.2%}" if start else ""
+        start = r.get("start_equity")  # each run's own baseline (changes after --reset-halt)
+        vs = f"{eq / start - 1:+.2%}" if start and eq else ""
         sent = sum(1 for x in (r.get("results") or []) if not str(x.get("status", "")).startswith("error"))
         note = r.get("blocked_reason") or r.get("buys_blocked_reason") or "; ".join(r.get("errors") or [])
         print(f"{r['time'][:19]:<20} {r['mode']:<12} {eq:>12,.2f} {vs:>9} {sent:>6}  {note[:60]}")
