@@ -1,8 +1,0 @@
-# Keys
-.env
-.env.*
-!.env.example
-
-# Your run history and bot state stay on your machine
-logs/
-state/
