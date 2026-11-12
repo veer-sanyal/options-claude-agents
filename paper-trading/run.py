@@ -5,6 +5,7 @@
     python run.py --trade        # same, then sends the approved orders to your PAPER account
     python run.py --mock         # no keys needed: fake account and a scripted decision
     python run.py --reset-halt   # clear the drawdown halt and restart the drawdown baseline
+    python run.py --check-claude # one tiny test call to Claude Code; no Alpaca, no trades
 
 There is no live-money mode. See README.md.
 """
@@ -42,6 +43,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="fake account and scripted decision; no keys, no network")
     p.add_argument("--reset-halt", action="store_true",
                    help="clear the drawdown halt and use current equity as the new baseline")
+    p.add_argument("--check-claude", action="store_true",
+                   help="make one tiny test call to Claude Code and report; no Alpaca, no trades")
     args = p.parse_args(argv)
 
     load_dotenv_file()
@@ -55,6 +58,9 @@ def main(argv: list[str] | None = None) -> int:
     from papertrader.decide import ClaudeDecider, ScriptedDecider
     from papertrader.runner import RunLock, run_once
     from papertrader.state import State
+
+    if args.check_claude:
+        return check_claude(settings)
 
     if args.mock:
         settings = dataclasses.replace(
@@ -123,6 +129,29 @@ def main(argv: list[str] | None = None) -> int:
     print((settings.log_dir / "latest.md").read_text())
     if mode == "dry-run" and record["approved"]:
         print("Dry run: nothing was sent. Add --trade to send these to the paper account.")
+    if (record.get("claude") or {}).get("error"):
+        print(f"Claude step failed, so nothing was traded: {record['claude']['error']}",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
+def check_claude(settings) -> int:
+    from papertrader.decide import ClaudeDecider
+
+    decider = ClaudeDecider(settings)
+    if not decider.claude_bin:
+        where = f"at CLAUDE_BIN={settings.claude_bin}" if settings.claude_bin else "on PATH"
+        print(f"FAILED: Claude Code (the claude command) was not found {where}.", file=sys.stderr)
+        return 1
+    print(f"Using {decider.claude_bin}, model {settings.model}. Asking for a test answer...")
+    result = decider.check()
+    meta = result.meta
+    if meta.get("error"):
+        print(f"FAILED: {meta['error']}", file=sys.stderr)
+        return 1
+    print(f"OK: Claude Code answered (served by {', '.join(meta.get('served_by') or ['?'])}, "
+          f"{meta.get('duration_ms')} ms). Scheduled runs should work in this environment.")
     return 0
 
 

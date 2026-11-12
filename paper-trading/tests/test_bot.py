@@ -301,24 +301,45 @@ def test_claude_code_good_answer(settings):
 
 
 def test_claude_code_command_is_locked_down(settings, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    monkeypatch.setenv("ALPACA_SECRET_KEY", "secret")
-    fake = FakeRun(cc_result(GOOD.model_dump()))
+    from papertrader.decide import CHILD_ENV_ALLOW
+
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+                 "CLAUDE_CODE_USE_BEDROCK", "ALPACA_API_KEY", "ALPACA_SECRET_KEY", "GITHUB_TOKEN"):
+        monkeypatch.setenv(name, "x")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sub-token")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    seen = {}
+
+    class Run(FakeRun):
+        def __call__(self, args, **kwargs):
+            seen["cwd_files"] = list(Path(kwargs["cwd"]).iterdir())
+            seen["cwd"] = kwargs["cwd"]
+            return super().__call__(args, **kwargs)
+
+    fake = Run(cc_result(GOOD.model_dump()))
     decide_with(settings, fake)
     a = fake.args
     assert a[0] == "/usr/local/bin/claude" and "-p" in a
     assert a[a.index("--tools") + 1] == ""                      # no tools at all
+    assert a[a.index("--setting-sources") + 1] == ""            # no settings files
     assert a[a.index("--output-format") + 1] == "json"
     assert _json.loads(a[a.index("--json-schema") + 1])["title"] == "Decision"
     assert a[a.index("--model") + 1] == "claude-opus-5-5"
     assert a[a.index("--effort") + 1] == "high"
-    assert "--safe-mode" in a and "--no-session-persistence" in a
-    # The account data goes in on stdin; secrets never reach the child process.
+    assert a[a.index("--max-turns") + 1] == "5"
+    assert a[a.index("--system-prompt") + 1].startswith("strategy")
+    for flag in ("--safe-mode", "--strict-mcp-config", "--no-session-persistence"):
+        assert flag in a
+    # Runs in a fresh, empty temporary folder that is gone afterwards.
+    assert seen["cwd_files"] == [] and not Path(seen["cwd"]).exists()
+    # The account data goes in on stdin; only allowlisted variables reach the child.
     assert "watchlist_features" in fake.kwargs["input"]
     env = fake.kwargs["env"]
-    assert "ANTHROPIC_API_KEY" not in env and "ALPACA_SECRET_KEY" not in env
+    assert set(env) <= set(CHILD_ENV_ALLOW)
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sub-token"
+    assert env["PATH"].split(":")[0] == "/usr/local/bin"         # node next to claude is findable
     assert fake.kwargs["timeout"] == settings.claude_timeout_s
-    assert fake.kwargs["cwd"] != str(HERE)
 
 
 @pytest.mark.parametrize("fake", [
@@ -455,3 +476,67 @@ def test_bad_setting_names_the_variable(monkeypatch):
     monkeypatch.setenv("MAX_POSITION_PCT", "10%")
     with pytest.raises(ValueError, match="MAX_POSITION_PCT"):
         load_settings()
+
+
+def test_decider_init_finds_claude_bin(settings, tmp_path):
+    exe = tmp_path / "claude"
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    d = ClaudeDecider(dataclasses.replace(settings, claude_bin=str(exe)), run=FakeRun())
+    assert d.claude_bin == str(exe)
+    d = ClaudeDecider(dataclasses.replace(settings, claude_bin=str(tmp_path / "missing")))
+    assert d.claude_bin is None
+
+
+def test_find_claude_fallback_paths(tmp_path, monkeypatch):
+    from papertrader import decide
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(decide.shutil, "which", lambda name: None)
+    monkeypatch.setattr(decide, "CLAUDE_BIN_CANDIDATES", ("~/.local/bin/claude",))
+    assert decide.find_claude() is None
+    nvm = tmp_path / ".nvm/versions/node/v22.1.0/bin/claude"
+    nvm.parent.mkdir(parents=True)
+    nvm.write_text("#!/usr/bin/env node\n")
+    nvm.chmod(0o755)
+    assert decide.find_claude() == str(nvm)
+    native = tmp_path / ".local/bin/claude"
+    native.parent.mkdir(parents=True)
+    native.write_text("bin")
+    native.chmod(0o755)
+    assert decide.find_claude() == str(native)               # native install wins
+
+
+def test_check_call_trades_nothing(settings):
+    fake = FakeRun(cc_result({"market_view": "ok", "trades": [], "notes": ""}))
+    r = make_decider(settings, fake).check()
+    assert "error" not in r.meta and r.decision.trades == []
+    assert "watchlist_features" not in fake.kwargs["input"]  # no account data sent
+
+
+def test_timeout_must_stay_under_lock_staleness(monkeypatch):
+    monkeypatch.setenv("CLAUDE_TIMEOUT_S", "4000")
+    with pytest.raises(ValueError, match="CLAUDE_TIMEOUT_S"):
+        load_settings()
+
+
+def test_run_exits_nonzero_when_claude_step_fails(tmp_path, monkeypatch):
+    import run as run_module
+    from papertrader import runner
+
+    rec = {"approved": [], "claude": {"error": "not logged in"}}
+    monkeypatch.setattr(runner, "run_once", lambda *a, **k: rec)
+    monkeypatch.setenv("ALPACA_API_KEY", "PKTEST")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "x")
+    monkeypatch.setattr(run_module, "find_claude", lambda *a: "/usr/local/bin/claude")
+    monkeypatch.setattr("papertrader.broker.AlpacaBroker", lambda *a: object())
+    monkeypatch.setattr("papertrader.decide.ClaudeDecider", lambda *a, **k: object())
+    monkeypatch.setattr(run_module, "load_dotenv_file", lambda: None)
+    import papertrader.config as cfg
+    real = cfg.load_settings
+    monkeypatch.setattr(run_module, "load_settings",
+                        lambda: dataclasses.replace(real(), log_dir=tmp_path, state_dir=tmp_path))
+    (tmp_path / "latest.md").write_text("log")
+    assert run_module.main([]) == 1
+    rec["claude"] = {}                       # same run with a clean Claude step exits 0,
+    assert run_module.main([]) == 0          # so the 1 above came from the Claude error

@@ -6,6 +6,7 @@ which can shrink or reject it. Claude never sends an order itself.
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 import shutil
@@ -95,39 +96,65 @@ def build_prompt(settings: Settings, snapshot: dict, features: dict[str, dict],
     return system, user
 
 
-# Secrets the Claude Code call never needs. The Anthropic ones are removed so the
-# call runs on your Claude subscription: in print mode Claude Code always uses
-# ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN when one is set, which would bill an
-# API account instead.
-CHILD_ENV_DROP = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ALPACA_API_KEY",
-                  "ALPACA_SECRET_KEY", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY")
+# The Claude Code call gets only these environment variables. Everything else is
+# left out on purpose:
+# - ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN: in print mode Claude Code always
+#   uses one when it is set, which would bill an API account, not your plan.
+# - ANTHROPIC_BASE_URL, CLAUDE_CODE_USE_BEDROCK/VERTEX: would route elsewhere.
+# - Your Alpaca keys and any other secrets in your shell: Claude doesn't need them.
+CHILD_ENV_ALLOW = (
+    "HOME", "USER", "LOGNAME", "SHELL", "PATH", "TMPDIR", "TZ", "TERM",
+    "LANG", "LC_ALL", "LC_CTYPE",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+    "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS",
+    "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME",
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_OAUTH_TOKEN",  # your subscription token from `claude setup-token`, for cron
+)
 
 # Where Claude Code usually lives, for runs (like cron) whose PATH is minimal.
+# The native installer puts it in ~/.local/bin; npm installs land in the others.
 CLAUDE_BIN_CANDIDATES = (
     "~/.local/bin/claude",
     "~/.claude/local/claude",
     "/opt/homebrew/bin/claude",
     "/usr/local/bin/claude",
+    "~/.npm-global/bin/claude",
 )
+NVM_GLOB = "~/.nvm/versions/node/*/bin/claude"
+
+
+def _executable(path: Path) -> bool:
+    return path.is_file() and os.access(path, os.X_OK)
 
 
 def find_claude(configured: str | None = None) -> str | None:
     """Path to the claude CLI, or None if it can't be found."""
     if configured:
         path = Path(configured).expanduser()
-        return str(path) if path.is_file() and os.access(path, os.X_OK) else None
+        return str(path) if _executable(path) else None
     found = shutil.which("claude")
     if found:
         return found
     for c in CLAUDE_BIN_CANDIDATES:
         path = Path(c).expanduser()
-        if path.is_file() and os.access(path, os.X_OK):
+        if _executable(path):
             return str(path)
+    for c in sorted(glob.glob(os.path.expanduser(NVM_GLOB)), reverse=True):
+        if _executable(Path(c)):
+            return c
     return None
 
 
-def child_env() -> dict[str, str]:
-    return {k: v for k, v in os.environ.items() if k not in CHILD_ENV_DROP}
+def child_env(claude_bin: str | None = None) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if k in CHILD_ENV_ALLOW}
+    path = env.get("PATH") or "/usr/bin:/bin:/usr/sbin:/sbin"
+    if claude_bin:
+        # An npm-installed claude starts with `#!/usr/bin/env node`, so node must be
+        # findable; it sits next to claude. Cron's PATH would not have it.
+        path = f"{Path(claude_bin).parent}{os.pathsep}{path}"
+    env["PATH"] = path
+    return env
 
 
 def _tail(text: str | bytes | None, n: int = 500) -> str:
@@ -163,6 +190,7 @@ class ClaudeDecider:
             "--system-prompt", system,             # replaces Claude Code's coding prompt
             "--tools", "",                         # no tools at all: no files, no shell, no web
             "--safe-mode",                         # ignore CLAUDE.md, hooks, plugins, MCP, memory
+            "--setting-sources", "",               # ignore your settings files (no apiKeyHelper etc.)
             "--strict-mcp-config",
             "--max-turns", "5",
             "--no-session-persistence",
@@ -170,6 +198,18 @@ class ClaudeDecider:
 
     def decide(self, snapshot: dict, features: dict[str, dict]) -> DecisionResult:
         system, user = build_prompt(self.settings, snapshot, features, self.strategy_text)
+        return self._ask(system, user)
+
+    def check(self) -> DecisionResult:
+        """One tiny real call, to prove Claude Code works here (logged in, the model is
+        on your plan, structured output works). Trades nothing."""
+        return self._ask(
+            "You are testing a connection. Answer with market_view set to \"ok\", an "
+            "empty trades list and empty notes.",
+            "Connection test.",
+        )
+
+    def _ask(self, system: str, user: str) -> DecisionResult:
         meta: dict = {"via": "claude-code", "model": self.settings.model,
                       "effort": self.settings.effort}
         if not self.claude_bin:
@@ -185,7 +225,7 @@ class ClaudeDecider:
                     capture_output=True,
                     text=True,
                     cwd=tmp,             # empty folder: no project files or CLAUDE.md nearby
-                    env=child_env(),
+                    env=child_env(self.claude_bin),
                     timeout=self.settings.claude_timeout_s,
                 )
         except subprocess.TimeoutExpired:

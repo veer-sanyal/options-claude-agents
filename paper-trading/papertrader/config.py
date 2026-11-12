@@ -111,8 +111,10 @@ def validate(s: Settings) -> None:
         problems.append("MAX_ORDERS_PER_RUN cannot be negative")
     if s.min_order_dollars < 1:
         problems.append("MIN_ORDER_DOLLARS must be at least 1 (Alpaca's fractional minimum)")
-    if s.claude_timeout_s <= 0:
-        problems.append("CLAUDE_TIMEOUT_S must be positive")
+    if not (0 < s.claude_timeout_s <= 3000):
+        # A run holding the lock longer than an hour counts as stale, so the timeout
+        # must stay well under that or two runs could overlap.
+        problems.append("CLAUDE_TIMEOUT_S must be between 1 and 3000 seconds")
     if s.effort not in ("low", "medium", "high", "xhigh", "max"):
         problems.append("CLAUDE_EFFORT must be one of low, medium, high, xhigh, max")
     if problems:

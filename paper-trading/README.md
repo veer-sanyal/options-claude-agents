@@ -69,10 +69,15 @@ The bot asks Claude through Claude Code (the `claude` command), so it uses
 your Claude subscription and needs no API key. In a terminal:
 
 ```bash
-claude --version      # if this fails, install Claude Code first
+claude --version      # if this fails, install Claude Code first (the native
+                      # installer from the Claude Code docs is easiest for cron)
 claude update         # the bot uses recent flags such as --safe-mode
-claude                # if you are not logged in, type /login, then /exit
+claude                # opens Claude Code; if it asks you to log in, follow the
+                      # prompts with your Claude account, then type /exit
 ```
+
+Later, after installing (step 3), `python run.py --check-claude` makes one tiny
+test call and prints OK or the exact problem. It touches no Alpaca account.
 
 How the call is locked down: every tool is switched off (Claude can't read
 files, run commands or browse), your CLAUDE.md files, hooks, plugins and MCP
@@ -125,7 +130,14 @@ add `--trade`. Run it during market hours (9:30 a.m. to 4 p.m. Eastern); with
 Each run makes one Claude call (usually a minute or two at `effort=high`),
 which counts toward your Claude plan's usage like any other Claude Code
 message. Once a day is small. To use less, set `CLAUDE_EFFORT=medium` in `.env`.
-If you hit your plan's limit, that run trades nothing and the log says why.
+If you hit your plan's limit, that run trades nothing and the log says why,
+unless your plan has paid extra usage switched on, in which case the run goes
+ahead and is billed as extra usage. If the default model (`claude-opus-5-5`)
+isn't on your plan, `--check-claude` will say so; set `CLAUDE_MODEL` in `.env`
+to one that is.
+
+When the Claude step fails for any reason, the run trades nothing, logs why,
+and exits with code 1.
 
 ## Running it on a schedule (your laptop)
 
@@ -155,19 +167,28 @@ Full Disk Access, click +, press Cmd+Shift+G, type `/usr/sbin/cron`, and add it.
 After the first scheduled weekday, check that `logs/cron.log` exists and that
 `python report.py` shows the run. If neither appears, cron was blocked.
 
-Two things can stop Claude Code under cron, because cron starts with almost
-no environment:
+Cron starts with almost no environment, so two more things are needed for
+Claude Code to work from it. Do both before relying on the schedule:
 
-- **It can't find `claude`.** Run `which claude` in a normal terminal and put
-  that full path in `.env` as `CLAUDE_BIN=...`.
-- **It isn't logged in.** On a Mac the login lives in the Keychain, which a
-  cron job may not be able to read. If the log says Claude Code isn't logged
-  in, run `claude setup-token` in a terminal (it needs a Pro or Max plan). It
-  prints a long-lived token; paste it into `.env` as
-  `CLAUDE_CODE_OAUTH_TOKEN=...`. Treat it like a password: it stays in `.env`,
-  which is gitignored.
+1. **Tell the bot where `claude` is.** Run `which claude` in a normal terminal
+   and put that full path in `.env` as `CLAUDE_BIN=...`.
+2. **Give it a login cron can use.** On a Mac your login lives in the Keychain,
+   which a cron job often can't read. Run `claude setup-token` in a terminal
+   (it needs a Pro or Max plan). It prints a long-lived token; paste it into
+   `.env` as `CLAUDE_CODE_OAUTH_TOKEN=...`. Treat it like a password: it stays
+   in `.env`, which is gitignored.
 
-Check both by running the exact cron command once by hand first.
+Then test the way cron will run it, with an empty environment:
+
+```bash
+cd $HOME/options-claude-agents/paper-trading
+env -i HOME=$HOME PATH=/usr/bin:/bin .venv/bin/python run.py --check-claude
+```
+
+It should print OK. A normal terminal can't show this, because it has your
+full PATH and Keychain access. (Running the cron line itself by hand doesn't
+prove much either: outside market hours `--trade` skips Claude, and inside
+market hours it sends real paper orders.)
 
 To stop the schedule, run `crontab -e` again and delete the line.
 
@@ -217,7 +238,7 @@ That clears the halt and uses today's equity as the new starting point.
 ## Files
 
 ```
-run.py                 entry point (dry run, --trade, --mock, --reset-halt)
+run.py                 entry point (dry run, --trade, --mock, --reset-halt, --check-claude)
 report.py              summary of the log
 strategy.md            the strategy Claude follows (edit this)
 papertrader/config.py  limits and settings
