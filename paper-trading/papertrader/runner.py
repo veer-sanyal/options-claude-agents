@@ -13,6 +13,7 @@ from .decide import EMPTY, DecisionResult
 from .features import compute_features
 from .journal import append_run
 from .risk import account_gate, apply_limits
+from .safety import LiveTradingRefused
 from .state import State
 
 
@@ -110,6 +111,8 @@ def run_once(broker, decider, settings: Settings, state: State, *, trade: bool,
             for order in risk.approved:
                 try:
                     results.append(broker.submit(order))
+                except LiveTradingRefused:
+                    raise  # never retry, never log as an ordinary order error: stop the run
                 except Exception as e:
                     results.append({"status": f"error: {type(e).__name__}: {e}",
                                     "symbol": order.symbol})

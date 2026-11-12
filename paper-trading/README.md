@@ -122,7 +122,7 @@ crontab -e
 and add one line (change the path to where the repo lives on your laptop):
 
 ```
-0 10 * * 1-5 cd $HOME/options-claude-agents/paper-trading && .venv/bin/python run.py --trade >> logs/cron.log 2>&1
+0 10 * * 1-5 cd $HOME/options-claude-agents/paper-trading && mkdir -p logs && .venv/bin/python run.py --trade >> logs/cron.log 2>&1
 ```
 
 That runs at 10:00 a.m. Monday to Friday **in your laptop's time zone**. In

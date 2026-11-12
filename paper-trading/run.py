@@ -67,23 +67,35 @@ def main(argv: list[str] | None = None) -> int:
                 print("Missing ALPACA_API_KEY / ALPACA_SECRET_KEY. Put your PAPER keys in "
                       "paper-trading/.env (see README.md), or use --mock.", file=sys.stderr)
                 return 2
+            if not args.reset_halt and not (os.environ.get("ANTHROPIC_API_KEY")
+                                            or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
+                print("Missing ANTHROPIC_API_KEY. Put it in paper-trading/.env (see README.md), "
+                      "or use --mock.", file=sys.stderr)
+                return 2
             broker = AlpacaBroker(key, secret)
         except LiveTradingRefused as e:
             print(f"REFUSING TO START: {e}", file=sys.stderr)
             return 2
         mode = "paper-trade" if args.trade else "dry-run"
 
-    try:
-        state = State(settings.state_dir)
-    except ValueError as e:
-        print(f"state file is unreadable ({e}); fix or delete {settings.state_dir}/state.json",
-              file=sys.stderr)
-        return 2
+    def load_state():
+        try:
+            return State(settings.state_dir)
+        except ValueError as e:
+            raise SystemExit(f"state file is unreadable ({e}); fix or delete "
+                             f"{settings.state_dir}/state.json")
 
     if args.reset_halt:
-        equity = broker.snapshot()["account"]["equity"]
-        state.reset_halt(new_start_equity=equity)
-        state.save()
+        # Under the lock, so a scheduled run cannot write the old halt flag back over this.
+        try:
+            with RunLock(settings.state_dir):
+                state = load_state()
+                equity = broker.snapshot()["account"]["equity"]
+                state.reset_halt(new_start_equity=equity)
+                state.save()
+        except RuntimeError as e:
+            print(e, file=sys.stderr)
+            return 1
         print(f"Halt cleared. New drawdown baseline: ${equity:,.2f}")
         return 0
 
@@ -94,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         with RunLock(settings.state_dir):
+            state = load_state()  # loaded inside the lock so runs never overwrite each other
             record = run_once(broker, decider, settings, state,
                               trade=args.trade, mode_label=mode)
     except LiveTradingRefused as e:

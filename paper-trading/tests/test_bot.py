@@ -397,3 +397,19 @@ def test_alpaca_broker_snapshot_and_submit_offline(monkeypatch):
     with pytest.raises(safety.LiveTradingRefused):
         b.submit(PlannedOrder(symbol="AAPL", side="buy", est_dollars=1, reason="t", notional=1.0))
     assert len(sent) == 1
+
+
+# ------------------------------------------------------- round 2 review fixes
+def test_paper_refusal_at_order_time_stops_the_run(settings):
+    class LiveLooking(MockBroker):
+        def submit(self, order):
+            raise safety.LiveTradingRefused("not paper")
+    with pytest.raises(safety.LiveTradingRefused):
+        run_once(LiveLooking(), ScriptedDecider(), settings, State(settings.state_dir),
+                 trade=True, mode_label="mock")
+
+
+def test_bad_setting_names_the_variable(monkeypatch):
+    monkeypatch.setenv("MAX_POSITION_PCT", "10%")
+    with pytest.raises(ValueError, match="MAX_POSITION_PCT"):
+        load_settings()

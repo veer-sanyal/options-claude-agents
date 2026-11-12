@@ -20,12 +20,22 @@ DEFAULT_WATCHLIST = (
 
 def _float(name: str, default: float) -> float:
     raw = os.environ.get(name)
-    return float(raw) if raw not in (None, "") else default
+    if raw in (None, ""):
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        raise ValueError(f"Bad settings: {name}={raw!r} is not a number (use 0.10 for 10%)") from None
 
 
 def _int(name: str, default: int) -> int:
     raw = os.environ.get(name)
-    return int(raw) if raw not in (None, "") else default
+    if raw in (None, ""):
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(f"Bad settings: {name}={raw!r} is not a whole number") from None
 
 
 @dataclass(frozen=True)
